@@ -3,8 +3,7 @@ from typing import Dict, Optional, Tuple
 import cv2
 
 from frame_analysis import analyze_frame
-from tracking_managers.table_tracker_manager import TableTrackerManager
-from video_processor import VideoProcessor
+from video_process.video_processor import VideoProcessor
 
 
 class VideoPreprocessor:
@@ -30,14 +29,6 @@ class VideoPreprocessor:
 
         # Initialize bounds as None
         self.crop_bounds = None
-
-        # Initialize table tracker manager
-        self.table_tracker_manager = TableTrackerManager(
-            iou_threshold=0.2,
-            min_confidence_frames=3,
-            max_lost_frames=5,
-            detection_threshold=0.7,
-        )
 
     def _calculate_padded_bounds(self, bounds: Dict[str, int]) -> Dict[str, int]:
         """Calculate padded bounds based on table detection."""
@@ -70,29 +61,29 @@ class VideoPreprocessor:
         """
         cap = cv2.VideoCapture(self.video_path)
         frame_count = 0
-        frame_shape = None
+        last_table_state = None # Store the last known table state
 
         while frame_count < max_frames:
             ret, frame = cap.read()
             if not ret:
                 break
 
-            frame_shape = frame.shape
-
-            # Analyze frame to get detections
+            # Analyze frame to get detections and updated tracker states
             _, detections = analyze_frame(frame)
 
-            # Update table tracker with new detections
-            if detections.get("table"):
-                self.table_tracker_manager.update(detections["table"], frame.shape)
+            # Get the state of the table tracker from analyze_frame's results
+            table_tracker_state = detections.get("table_tracker")
 
-            # Check if we have a confident table tracker
-            tracker = self.table_tracker_manager.get_primary_tracker()
-            if tracker and tracker.is_confident:
+            # Store the most recent state
+            if table_tracker_state:
+                last_table_state = table_tracker_state
+
+            # Check if the table tracker managed by analyze_frame is confident
+            if table_tracker_state and table_tracker_state["is_confident"]:
                 print(
                     f"VideoPreprocessor: Found confident table tracker at frame {frame_count}"
                 )
-                box = tracker.box
+                box = table_tracker_state["box"]
                 table_bounds = {"x1": box[0], "y1": box[1], "x2": box[2], "y2": box[3]}
 
                 # Add padding to the bounds
@@ -105,16 +96,16 @@ class VideoPreprocessor:
         cap.release()
 
         # If we got here, we didn't find a confident tracker
-        if self.table_tracker_manager.get_primary_tracker():
-            # Use the best tracker we have, even if not fully confident
-            tracker = self.table_tracker_manager.get_primary_tracker()
-            box = tracker.box
+        # Use the last known state, even if not fully confident
+        if last_table_state:
+            print("VideoPreprocessor: Confident tracker not found, using last known bounds.")
+            box = last_table_state["box"]
             table_bounds = {"x1": box[0], "y1": box[1], "x2": box[2], "y2": box[3]}
             self.crop_bounds = self._calculate_padded_bounds(table_bounds)
             return self.crop_bounds
 
         raise ValueError(
-            "No stable table tracker could be established. Check detection thresholds or try a different video segment."
+            "No table tracker state found within max_frames. Check analyze_frame logic or video segment."
         )
 
     def process_video(self, output_path: str) -> None:

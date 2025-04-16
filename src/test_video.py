@@ -6,14 +6,14 @@ import sys
 import cv2
 
 import frame_analysis  # Import the module itself
-from video_preprocessor import VideoPreprocessor
-from video_processor import VideoProcessor
+from video_process.video_preprocessor import VideoPreprocessor
+from video_process.video_processor import VideoProcessor
 
 
-def display_frame(frame):
+def display_frame(frame, table_viz=True, hand_viz=True, cup_viz=True, cup_search_viz=False):
     """Process and display frame with object detection"""
     # Analyze the frame using the updated analysis function
-    annotated_frame, detections = frame_analysis.analyze_frame(frame)
+    annotated_frame, detections = frame_analysis.analyze_frame(frame, table_viz, hand_viz, cup_viz, cup_search_viz)
 
     # Print detection information
     print("\nDetections:")
@@ -33,8 +33,13 @@ def display_frame(frame):
     else:
         print("Table Status: Not Detected")
 
-    # Comment out cup tracking output
-    # print(f"Cups found: {len(detections['cups'])}")
+    # Cup tracking information
+    cups_tracked = detections.get("cups_tracked", [])
+    raw_cups = detections.get("cups", [])
+    confident_cups = sum(1 for cup in cups_tracked if cup["is_confident"])
+    
+    print(f"Cups found: {len(raw_cups)}")
+    print(f"Cups tracked: {len(cups_tracked)} (Confident: {confident_cups})")
 
     # Print info about tracked hands
     hands_tracked_count = len(detections.get("hands_tracked", []))
@@ -109,6 +114,30 @@ def main():
         action="store_true",
         help="Enable frame-by-frame mode (press Enter to advance, 'q' to quit)",
     )
+    parser.add_argument(
+        "--table-viz",
+        action="store_true",
+        default=True,
+        help="Enable table visualization",
+    )
+    parser.add_argument(
+        "--hand-viz",
+        action="store_true",
+        default=True,
+        help="Enable hand visualization",
+    )
+    parser.add_argument(
+        "--cup-viz",
+        action="store_true",
+        default=True,
+        help="Enable cup visualization",
+    )
+    parser.add_argument(
+        "--cup-search-viz",
+        action="store_true",
+        default=False,
+        help="Show cup search boxes (hidden by default)",
+    )
 
     args = parser.parse_args()
 
@@ -165,7 +194,13 @@ def main():
                 cropped_frame = frame
 
             # Process frame after cropping
-            processed_frame = display_frame(cropped_frame)
+            processed_frame = display_frame(
+                cropped_frame,
+                table_viz=args.table_viz,
+                hand_viz=args.hand_viz,
+                cup_viz=args.cup_viz,
+                cup_search_viz=args.cup_search_viz
+            )
 
             cv2.imshow("Frame", processed_frame)
 

@@ -207,26 +207,27 @@ class ObjectTracker(ABC):
             "tracker_type": self.tracker_type,
         }
 
-    def draw(self, frame):
+    def draw(self, frame, show_search_box=False):
         """
         Draw the tracker's state onto the frame.
-        Only shows search box with label and actual box with type label.
+        Only shows search box with label if show_search_box is True.
         """
-        # Draw search box (dashed yellow)
-        sb = self.search_box.astype(int)
-        cv2.rectangle(
-            frame, (sb[0], sb[1]), (sb[2], sb[3]), (0, 255, 255), 2, cv2.LINE_AA
-        )
-        # Add search box label
-        cv2.putText(
-            frame,
-            f"{self.tracker_type} Search",
-            (sb[0], sb[1] - 10),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (0, 255, 255),
-            2,
-        )
+        # Draw search box (dashed yellow) if requested
+        if show_search_box:
+            sb = self.search_box.astype(int)
+            cv2.rectangle(
+                frame, (sb[0], sb[1]), (sb[2], sb[3]), (0, 255, 255), 2, cv2.LINE_AA
+            )
+            # Add search box label
+            cv2.putText(
+                frame,
+                f"{self.tracker_type} Search",
+                (sb[0], sb[1] - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 255, 255),
+                2,
+            )
 
         # Draw current box
         b = self.box.astype(int)

@@ -19,6 +19,7 @@ class TrackerManager(ABC):
         detection_threshold=0.7,
         track_single_instance=False,
         motion_history_max_len=5,
+        target_labels=None,  # Labels this tracker looks for
     ):
         self.trackers = []
         self.iou_threshold = iou_threshold
@@ -30,6 +31,7 @@ class TrackerManager(ABC):
         self.track_single_instance = (
             track_single_instance  # Whether to track only one instance (for tables)
         )
+        self.target_labels = target_labels or []  # Labels this tracker looks for
 
         # Camera motion estimation
         self.camera_motion = np.zeros(2, dtype=float)
@@ -37,6 +39,10 @@ class TrackerManager(ABC):
         self.motion_history_max_len = (
             motion_history_max_len  # Maximum history length for motion estimation
         )
+        # For cup tracking where relative position is important, we want to prioritize
+        # position (distance) over IoU since cups look similar
+        self.cost_weight_iou = 0.3  # Weight for IoU in cost function (reduced for cups)
+        self.cost_weight_distance = 0.7  # Weight for distance (increased for cups)
 
     def reset(self):
         """Reset all trackers - useful when needing to clear current tracking state"""
@@ -191,9 +197,14 @@ class TrackerManager(ABC):
         else:
             self.camera_motion = np.zeros(2, dtype=float)
 
+    def _calculate_centroid(self, box):
+        """Helper to calculate the center of a bounding box."""
+        return np.array([(box[0] + box[2]) / 2, (box[1] + box[3]) / 2])
+
     def match_detections_to_trackers(self, detections):
         """
-        Match detections to trackers using IoU and Hungarian algorithm.
+        Match detections to trackers using a combined cost of IoU and centroid distance,
+        solved with the Hungarian algorithm. Ensures one detection matches at most one tracker.
 
         Args:
             detections: List of detection dictionaries
@@ -210,20 +221,60 @@ class TrackerManager(ABC):
             unmatched_trackers = list(range(len(self.trackers)))
             return matched_indices, unmatched_trackers, unmatched_detections
 
-        # Calculate cost matrix (negative IoU, higher IoU = lower cost)
+        # Calculate frame diagonal for distance normalization
+        frame_height, frame_width = self.last_frame_shape[:2] if self.last_frame_shape else (1, 1)
+        frame_diagonal = np.sqrt(frame_width**2 + frame_height**2)
+        # Avoid division by zero if frame size is degenerate
+        frame_diagonal = max(frame_diagonal, 1.0)
+
+        # Calculate cost matrix using combined cost
         cost_matrix = np.full((len(self.trackers), len(detections)), np.inf)
 
+        # Track historical assignment distances to use for resolving conflicts
+        historical_distances = np.zeros((len(self.trackers), len(detections)))
+
         for t_idx, tracker in enumerate(self.trackers):
+            # Tracker's predicted center (predict() was called before this)
+            tracker_predicted_center = tracker.center
+            tracker_predicted_box = tracker.box # The box after prediction
+
             for d_idx, det in enumerate(detections):
-                # Extract bbox from detection (implementation may vary)
+                # Extract bbox and calculate center from detection
                 det_bbox = self._extract_bbox_from_detection(det)
+                det_center = self._calculate_centroid(det_bbox)
 
-                # Calculate IoU between tracker box and detection
-                iou = tracker.calculate_iou(tracker.box, det_bbox)
-                if iou >= self.iou_threshold:
-                    cost_matrix[t_idx, d_idx] = 1.0 - iou  # Cost is 1 - IoU
+                # Calculate IoU between tracker's *predicted* box and detection box
+                iou = tracker.calculate_iou(tracker_predicted_box, det_bbox)
 
-        # Check if cost matrix is all infinite (no matches exceed threshold)
+                # Calculate Euclidean distance between predicted center and detection center
+                distance = np.linalg.norm(tracker_predicted_center - det_center)
+                normalized_distance = distance / frame_diagonal
+                
+                # Store the raw distance for conflict resolution
+                historical_distances[t_idx, d_idx] = distance
+
+                # For objects that are very close to each other, IoU could be confusing
+                # So we'll rely more on the distance for these cases
+                
+                # Only allow matches where the normalized distance is below a reasonable threshold
+                # This prevents distant matches even when IoU might indicate an overlap
+                max_distance_threshold = 0.2  # 20% of the frame diagonal as a max distance
+                
+                if normalized_distance <= max_distance_threshold:
+                    # If IoU is adequate, use combined cost
+                    if iou >= self.iou_threshold:
+                        # Combined cost: lower is better
+                        cost = (self.cost_weight_iou * (1.0 - iou) +
+                                self.cost_weight_distance * normalized_distance)
+                    else:
+                        # If IoU is below threshold but distance is small enough,
+                        # still consider the match but penalize it
+                        cost = (self.cost_weight_iou * 1.0 + 
+                                self.cost_weight_distance * normalized_distance)
+                    
+                    cost_matrix[t_idx, d_idx] = cost
+
+        # Check if cost matrix is all infinite (no matches meet our criteria)
         if np.all(np.isinf(cost_matrix)):
             # No valid assignments can be made - all trackers will be unmatched
             matched_indices = []
@@ -231,25 +282,60 @@ class TrackerManager(ABC):
             unmatched_detections = list(range(len(detections)))
             return matched_indices, unmatched_trackers, unmatched_detections
 
-        # Some valid matches exist - run Hungarian algorithm
+        # Some valid matches might exist - run Hungarian algorithm
         # Replace np.inf with a large finite number for the algorithm
         finite_cost_matrix = np.where(np.isinf(cost_matrix), 1e10, cost_matrix)
 
         # Use Hungarian algorithm to find optimal assignments
         row_ind, col_ind = linear_sum_assignment(finite_cost_matrix)
 
-        # Filter out matches with cost > threshold (i.e., IoU < threshold)
+        # Filter out assignments with excessive cost
+        # 1.0 is a reasonable maximum as it represents the worst case scenario
+        # for the combined iou (0) and normalized distance (up to our max threshold)
+        cost_threshold = 0.85  # Slightly reduced from 1.0 to be more selective
+        
+        # Process matches in order of cost (best matches first)
+        # This ensures that when there are multiple trackers competing for the same detection,
+        # the one with the lowest cost (best match) gets it
+        potential_matches = [(r, c, cost_matrix[r, c]) for r, c in zip(row_ind, col_ind)
+                             if cost_matrix[r, c] <= cost_threshold]
+        
+        # Sort by cost (lowest first)
+        potential_matches.sort(key=lambda x: x[2])
+        
+        # Track which detections and trackers have been assigned
+        assigned_detections = set()
+        assigned_trackers = set()
         matched_indices = []
-        unmatched_trackers = list(range(len(self.trackers)))
-        unmatched_detections = list(range(len(detections)))
-
-        for r, c in zip(row_ind, col_ind):
-            if cost_matrix[r, c] <= (
-                1.0 - self.iou_threshold
-            ):  # Check if cost is low enough
-                matched_indices.append((r, c))
-                unmatched_trackers.remove(r)
-                unmatched_detections.remove(c)
+        
+        # Resolve conflicts: assign detections to trackers in order of match quality
+        for r, c, cost in potential_matches:
+            # Skip if this tracker or detection is already assigned
+            if r in assigned_trackers or c in assigned_detections:
+                # If this tracker is unassigned but the detection is already taken,
+                # we have a conflict. Check if this tracker has a better historical claim
+                if r not in assigned_trackers and c in assigned_detections:
+                    # Find which tracker currently has this detection
+                    for existing_r, existing_c in matched_indices:
+                        if existing_c == c:
+                            # Compare historical distances to see who has better claim
+                            if historical_distances[r, c] < historical_distances[existing_r, c] * 0.8:
+                                # This tracker has a much better claim - swap assignments
+                                matched_indices.remove((existing_r, existing_c))
+                                assigned_trackers.remove(existing_r)
+                                matched_indices.append((r, c))
+                                assigned_trackers.add(r)
+                            break
+                continue
+                
+            # This is a valid assignment
+            matched_indices.append((r, c))
+            assigned_detections.add(c)
+            assigned_trackers.add(r)
+        
+        # Generate unmatched trackers and detections based on assignments
+        unmatched_trackers = [i for i in range(len(self.trackers)) if i not in assigned_trackers]
+        unmatched_detections = [i for i in range(len(detections)) if i not in assigned_detections]
 
         return matched_indices, unmatched_trackers, unmatched_detections
 
@@ -322,10 +408,10 @@ class TrackerManager(ABC):
         """Remove trackers that are marked as lost"""
         self.trackers = [t for t in self.trackers if not t.is_lost]
 
-    def draw_trackers(self, frame):
+    def draw_trackers(self, frame, show_search_box=False):
         """Draw all active trackers onto the frame"""
         for tracker in self.trackers:
-            frame = tracker.draw(frame)
+            frame = tracker.draw(frame, show_search_box=show_search_box)
         return frame
 
     def get_confident_trackers(self):
@@ -342,3 +428,29 @@ class TrackerManager(ABC):
             return self.trackers[0].box.astype(int).tolist()
 
         return None
+
+    def process_detr_results(self, results, model, frame_shape):
+        """
+        Process DETR detection results to extract relevant objects based on target_labels.
+        
+        Args:
+            results: DETR post-processed results
+            model: DETR model (for id2label mapping)
+            frame_shape: Tuple (height, width) of the current frame
+            
+        Returns:
+            tracker_state: Current state of all trackers after processing
+        """
+        # Extract detections that match our target labels
+        raw_detections = []
+        
+        for score, label, box in zip(results["scores"], results["labels"], results["boxes"]):
+            score_val = score.item()
+            box_coords = [round(i) for i in box.tolist()]
+            label_name = model.config.id2label[label.item()]
+            
+            if label_name in self.target_labels and score_val >= self.detection_threshold:
+                raw_detections.append({"box": box_coords, "confidence": score_val, "label": label_name})
+        
+        # Update trackers with these detections
+        return self.update(raw_detections, frame_shape)

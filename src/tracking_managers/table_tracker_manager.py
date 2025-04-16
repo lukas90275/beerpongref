@@ -26,6 +26,7 @@ class TableTrackerManager(TrackerManager):
             detection_threshold=detection_threshold,
             track_single_instance=True,  # Tables are single-instance trackers
             motion_history_max_len=8,  # Longer motion history for tables (more stable)
+            target_labels=["dining table", "table"],  # Labels to detect
         )
 
     def _extract_bbox_from_detection(self, detection):
