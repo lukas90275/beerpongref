@@ -1,0 +1,31 @@
+---
+description: structure and purpose of the two abstract base classes used for object tracking
+globs: 
+alwaysApply: false
+---
+ # Object Tracking Base Classes
+
+This rule outlines the structure and purpose of the two abstract base classes used for object tracking in this project.
+
+-   **`ObjectTracker` (`src/trackers/object_tracker.py`)**:
+    -   Abstract base class for tracking a *single* object instance across frames (e.g., one hand, the table).
+    -   Manages the state of one object: bounding box (`box`), velocity (`velocity`), confidence (`is_confident`, `confidence_frames`), lost status (`is_lost`, `lost_frames`), etc.
+    -   Provides core methods:
+        -   `predict()`: Estimates the object's state in the next frame based on velocity.
+        -   `update()`: Updates the state using a matched detection.
+        -   `mark_lost()`: Increments lost counter and potentially marks the tracker for removal.
+        -   `match_score()`: Calculates how well a detection matches the tracker (typically using IoU).
+    -   Concrete trackers (e.g., `HandTracker`, `TableTracker`) inherit from this.
+
+-   **`TrackerManager` (`src/tracking_managers/tracker_manager.py`)**:
+    -   Abstract base class for managing *multiple* `ObjectTracker` instances of a specific type (e.g., managing all active `HandTracker` instances).
+    -   Orchestrates the tracking process for a *category* of objects within a frame:
+        -   Takes a list of new detections for the frame.
+        -   Calls `predict()` on all its managed trackers.
+        -   Matches detections to trackers using IoU and the Hungarian algorithm (`match_detections_to_trackers`).
+        -   Calls `update()` on matched trackers.
+        -   Calls `mark_lost()` on unmatched trackers.
+        -   Creates new trackers for unmatched detections (unless `track_single_instance` is true).
+        -   Removes trackers lost for too long (`remove_lost_trackers`).
+        -   Estimates camera motion (`_estimate_camera_motion`) to compensate tracker predictions.
+    -   Concrete managers (e.g., `HandTrackerManager`, `TableTrackerManager`) inherit from this.

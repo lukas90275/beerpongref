@@ -1,0 +1,25 @@
+---
+description: function of `src/frame_analysis.py` and how it fits into the overall video processing
+globs: 
+alwaysApply: false
+---
+ # Frame Analysis Pipeline
+
+This rule describes the function of `src/frame_analysis.py` and how it fits into the overall video processing.
+
+-   **Core Function:** `analyze_frame(frame)` in `src/frame_analysis.py` is the central function responsible for processing a single video frame.
+
+-   **Orchestration Role:** It acts as an orchestrator, calling various detection and tracking components in sequence.
+
+-   **Typical Workflow:**
+    1.  Receives a raw video frame (BGR format).
+    2.  Converts frame format if necessary (e.g., BGR to RGB for certain models).
+    3.  Initializes or retrieves existing `TrackerManager` instances (e.g., `TableTrackerManager`, `HandTrackerManager`). These managers persist across frames.
+    4.  Performs **initial detections** for relevant object categories (e.g., using DETR for tables, MediaPipe for hands).
+    5.  Passes the raw detections for each category to the corresponding `TrackerManager`'s `.update()` method.
+    6.  The `TrackerManager` handles matching detections to existing tracks, updating track states, and managing track lifecycles (see `tracking-structure.mdc`).
+    7.  (Optional) Performs **secondary analysis** based on the results of the tracking (e.g., running cup detection *within* the tracked table bounds, detecting balls *within* tracked hands).
+    8.  Draws visualizations onto the frame (bounding boxes, labels) using the `.draw_trackers()` methods of the managers or specific drawing functions.
+    9.  Returns the annotated frame and a dictionary containing the current state of all detected and tracked objects.
+
+-   **Usage:** `analyze_frame` is typically called in a loop by a higher-level script that reads video frames, such as `src/test_video.py` for offline processing or potentially a script handling a live camera feed.

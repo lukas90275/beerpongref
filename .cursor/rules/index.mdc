@@ -1,0 +1,13 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+This document serves as the central index for all active Cursor rules within this repository.
+
+Please run the following command to see all cursor rules:
+```
+ls -la .cursor/rules
+```
+
+After any change, ponder whether a cursor rule would be appropriate to document a certain design choice. If so, see if its appropriate to add the rule to any existing rules. If not, see [cursor-rules.mdc](mdc:.cursor/rules/cursor-rules.mdc) to manually add your own rule.

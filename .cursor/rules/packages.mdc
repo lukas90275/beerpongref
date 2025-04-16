@@ -1,0 +1,10 @@
+---
+description: how packages work
+globs: 
+alwaysApply: false
+---
+This document defines how packages work within this directory:
+
+- A makefile @Makefile contains all necessary terminal tasks. Whenever installing a package, write it in @requirements.txt
+- I'm using a conda environment called "beer_pong_env"
+- Don't run any commands.

@@ -1,0 +1,10 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+This is a python project called "Beer Pong Referee". The project will take in a video of a beer pong game, and use cv to keep track of the score and enforce rules. Some very basic things about beer pong:
+
+- Table: The table is the main area where cups are put on top of. Its 8ft in length. We assume the user is perpendicular to the table (so that one team is on the left and the other on the right)
+- Cups: The cups are placed in a traingle formation on either end of the table. It starts with 10 cups on each side and each team aims for the cups acorss the table from them. As cups are hit, they are removed. The cups tend to be ~4.85 inches tall and ~3.84 inches wide at the very top. 
+- Ball: The ball is a white ping pong ball with a diameter of ~1.57 inches. Players throw the balls to try to get them into the other players cup.
