@@ -34,7 +34,15 @@ class CupTrackerManager(TrackerManager):
             track_single_instance=False,  # Track multiple cups
             motion_history_max_len=5,  # Increased for smoother motion estimation
             target_labels=["cup", "wine glass", "bottle"],  # Labels for cup detection
+            tracker_overlap_threshold=0.6,  # Cup-specific overlap threshold (lower to be more strict)
+            min_tracker_separation=0.03,  # Cup-specific minimum separation (lower because cups are arranged close together)
+            cost_weight_iou=0.4,  # Slightly higher weight for IoU for cups
+            cost_weight_distance=0.6,  # Slightly lower weight for distance
+            position_stability_factor=0.95,  # High stability for cups which are mostly stationary
         )
+        
+        # Cup-specific properties
+        self.size_tolerance = size_tolerance
         
         # These will be set when calibrating with the table
         self.left_region = None
@@ -42,14 +50,13 @@ class CupTrackerManager(TrackerManager):
         self.pixels_per_foot = None
         self.expected_cup_height_pixels = None
         self.expected_cup_width_pixels = None
-        self.size_tolerance = size_tolerance
-        
+    
     def _estimate_pixels_per_foot(self, table_width_pixels):
         """Estimate pixels per foot based on assumed table width."""
         if table_width_pixels > 0:
             return table_width_pixels / self.REAL_TABLE_WIDTH_FEET
         return None
-        
+    
     def calibrate_regions(self, table_bounds):
         """
         Calibrate the left and right cup regions based on the table bounds.
@@ -104,6 +111,12 @@ class CupTrackerManager(TrackerManager):
             "y2": region_end_y,
         }
         
+        # Initialize position history for each region
+        if "left" not in self.position_history:
+            self.position_history["left"] = []
+        if "right" not in self.position_history:
+            self.position_history["right"] = []
+    
     def _extract_bbox_from_detection(self, detection):
         """
         Extract bounding box from detection dictionary.
@@ -115,7 +128,7 @@ class CupTrackerManager(TrackerManager):
             List [x1, y1, x2, y2]
         """
         return detection["box"]
-        
+    
     def _create_tracker_from_detection(self, detection, frame_shape):
         """
         Create a new cup tracker from a detection.
@@ -126,40 +139,89 @@ class CupTrackerManager(TrackerManager):
             frame_shape: Frame dimensions
             
         Returns:
-            CupTracker instance or None if region cannot be determined
+            CupTracker instance
         """
         box = self._extract_bbox_from_detection(detection)
         confidence = detection.get("confidence", 0.0)
         center_x = (box[0] + box[2]) / 2
         center_y = (box[1] + box[3]) / 2
         
+        # Determine which region this cup belongs to
         region_bounds = None
-        if self.left_region and (self.left_region["x1"] <= center_x <= self.left_region["x2"] and self.left_region["y1"] <= center_y <= self.left_region["y2"]):
+        region_name = self._get_region_for_point(center_x, center_y)
+            
+        if region_name == "left" and self.left_region:
             region_bounds = [
                 self.left_region["x1"],
                 self.left_region["y1"],
                 self.left_region["x2"],
                 self.left_region["y2"],
             ]
-        elif self.right_region and (self.right_region["x1"] <= center_x <= self.right_region["x2"] and self.right_region["y1"] <= center_y <= self.right_region["y2"]):
+        elif region_name == "right" and self.right_region:
             region_bounds = [
                 self.right_region["x1"],
                 self.right_region["y1"],
                 self.right_region["x2"],
                 self.right_region["y2"],
             ]
-        # else: # If neither region is defined or cup is outside, don't create tracker?
-            # For now, let's allow creation without bounds if regions aren't set
-            # Or should we prevent creation if it's outside known regions? Let's assume for now
-            # that the filtering in process_detr_results handles this.
+            
+        # Generate a stable ID for this cup based on its position
+        cup_id = self._get_id_for_position(region_name, center_x, center_y)
             
         return CupTracker(
             initial_box=box,
             frame_shape=frame_shape,
             initial_confidence=confidence,
-            search_region_bounds=region_bounds # Pass the determined bounds
+            search_region_bounds=region_bounds, # Pass the determined bounds
+            tracker_id=cup_id,  # Use our stable ID if available
+            position_stability_factor=self.position_stability_factor,
         )
+    
+    def _get_region_for_point(self, x, y):
+        """Determine which region a point belongs to."""
+        if self.left_region and (self.left_region["x1"] <= x <= self.left_region["x2"] and 
+                                self.left_region["y1"] <= y <= self.left_region["y2"]):
+            return "left"
+        elif self.right_region and (self.right_region["x1"] <= x <= self.right_region["x2"] and 
+                                  self.right_region["y1"] <= y <= self.right_region["y2"]):
+            return "right"
+        return None
+    
+    def _get_id_for_position(self, region_name, center_x, center_y):
+        """Get a stable ID for a cup at the given position."""
+        if not region_name or region_name not in self.position_history:
+            return None
+            
+        # Find closest historical cup position (if any) to reuse ID
+        min_dist = float('inf')
+        closest_idx = -1
+        cup_positions = self.position_history[region_name]
         
+        for i, (pos_x, pos_y, existing_id) in enumerate(cup_positions):
+            # Use only x-distance for cups since they're viewed from the side
+            # and can be very close in y but different cups
+            dist = abs(center_x - pos_x)
+            
+            # If very close to existing position, reuse that ID
+            if dist < min_dist:
+                min_dist = dist
+                closest_idx = i
+                
+        # Calculate threshold based on cup size if available
+        distance_threshold = self.expected_cup_width_pixels * 0.5 if self.expected_cup_width_pixels else 20
+                
+        # If close enough to existing position, reuse ID
+        if closest_idx >= 0 and min_dist < distance_threshold:
+            cup_id = cup_positions[closest_idx][2]
+            # Update the position
+            cup_positions[closest_idx] = (center_x, center_y, cup_id)
+            return cup_id
+        
+        # Generate new ID for this cup
+        cup_id = f"{region_name}_cup_{len(cup_positions) + 1}"
+        cup_positions.append((center_x, center_y, cup_id))
+        return cup_id
+    
     def _update_tracker_with_detection(self, tracker, detection):
         """
         Update a cup tracker with a new detection.
@@ -171,7 +233,95 @@ class CupTrackerManager(TrackerManager):
         box = self._extract_bbox_from_detection(detection)
         confidence = detection.get("confidence", 0.0)
         
+        # Update tracker with the detection
         tracker.update(box, detection_confidence=confidence)
+        
+        # Update position history for this cup
+        cup_id = str(tracker.id)
+        center_x = (box[0] + box[2]) / 2
+        center_y = (box[1] + box[3]) / 2
+        
+        # Determine which region this cup belongs to now
+        region_name = self._get_region_for_point(center_x, center_y)
+            
+        if region_name and region_name in self.position_history:
+            # Update the position of this cup in the history
+            positions = self.position_history[region_name]
+            for i, (pos_x, pos_y, existing_id) in enumerate(positions):
+                if existing_id == cup_id:
+                    positions[i] = (center_x, center_y, cup_id)
+                    break
+    
+    def _pre_process_detections(self, detections):
+        """
+        Pre-process detections before matching.
+        For cups, filter by region and size.
+        """
+        filtered_detections = []
+        for det in detections:
+            if self._is_detection_in_regions(det) and self._is_detection_correct_size(det):
+                filtered_detections.append(det)
+        return filtered_detections
+    
+    def _pre_create_tracker_filter(self, detection):
+        """
+        Additional filtering before creating a new cup tracker.
+        Ensures detection is in valid region.
+        """
+        box = self._extract_bbox_from_detection(detection)
+        center_x = (box[0] + box[2]) / 2
+        center_y = (box[1] + box[3]) / 2
+        
+        # Must be in a defined region
+        region_name = self._get_region_for_point(center_x, center_y)
+        if not region_name:
+            return False
+            
+        return True
+    
+    def _post_create_tracker_filter(self, detection):
+        """
+        Final checks before creating a new cup tracker.
+        Apply cup-specific pattern constraints based on arrangement.
+        """
+        box = self._extract_bbox_from_detection(detection)
+        center_x = (box[0] + box[2]) / 2
+        center_y = (box[1] + box[3]) / 2
+        
+        # Determine which region this detection belongs to
+        region_name = self._get_region_for_point(center_x, center_y)
+        if not region_name:
+            return False
+            
+        # Check if we've seen cups in this region before
+        if region_name in self.position_history:
+            cup_positions = self.position_history[region_name]
+            
+            # Beer pong cups are arranged in specific patterns
+            # A new cup shouldn't appear too close to an existing tracked cup
+            for pos_x, pos_y, _ in cup_positions:
+                dist = np.sqrt((center_x - pos_x)**2 + (center_y - pos_y)**2)
+                if dist < (self.expected_cup_width_pixels * 0.8 if self.expected_cup_width_pixels else 30):
+                    return False  # Too close to existing position
+        
+        return True
+    
+    def _should_merge_trackers(self, tracker_a, tracker_b):
+        """
+        Determine if two overlapping cup trackers should be merged.
+        Consider region and confidence.
+        """
+        # If they're in different regions, don't merge
+        center_a = tracker_a.center
+        center_b = tracker_b.center
+        
+        region_a = self._get_region_for_point(center_a[0], center_a[1])
+        region_b = self._get_region_for_point(center_b[0], center_b[1])
+        
+        if region_a != region_b:
+            return False
+            
+        return True
         
     def _is_detection_in_regions(self, detection):
         """Check if a detection center falls within calibrated regions."""
@@ -182,17 +332,7 @@ class CupTrackerManager(TrackerManager):
         center_x = (box[0] + box[2]) / 2
         center_y = (box[1] + box[3]) / 2
         
-        in_left = (
-            self.left_region["x1"] <= center_x <= self.left_region["x2"]
-            and self.left_region["y1"] <= center_y <= self.left_region["y2"]
-        )
-        
-        in_right = (
-            self.right_region["x1"] <= center_x <= self.right_region["x2"]
-            and self.right_region["y1"] <= center_y <= self.right_region["y2"]
-        )
-        
-        return in_left or in_right
+        return self._get_region_for_point(center_x, center_y) is not None
 
     def _is_detection_correct_size(self, detection):
         """Check if a detection's bounding box size matches expected cup size."""
@@ -219,7 +359,7 @@ class CupTrackerManager(TrackerManager):
         
         return width_ok and height_ok and aspect_ratio_ok
 
-    def process_detr_results(self, results, model, frame_shape, table_bounds=None):
+    def process_detr_results(self, results, model, frame_shape, table_bounds=None, **kwargs):
         """
         Process DETR detection results: filter by label, confidence, region, and size.
         Then update trackers.
@@ -233,28 +373,12 @@ class CupTrackerManager(TrackerManager):
         Returns:
             tracker_state: Current state of all cup trackers after processing
         """
-        # 1. Calibrate regions and expected size if table_bounds are provided
+        # Calibrate regions and expected size if table_bounds are provided
         if table_bounds is not None:
             self.calibrate_regions(table_bounds)
             
-        # 2. Initial filter by label and confidence
-        raw_detections = []
-        for score, label, box in zip(results["scores"], results["labels"], results["boxes"]):
-            score_val = score.item()
-            box_coords = [round(i) for i in box.tolist()]
-            label_name = model.config.id2label[label.item()]
-            
-            if label_name in self.target_labels and score_val >= self.detection_threshold:
-                raw_detections.append({"box": box_coords, "confidence": score_val, "label": label_name})
-
-        # 3. Filter by region and size
-        filtered_detections = []
-        for det in raw_detections:
-            if self._is_detection_in_regions(det) and self._is_detection_correct_size(det):
-                filtered_detections.append(det)
-        
-        # 4. Update trackers with the final filtered detections
-        return self.update(filtered_detections, frame_shape) # Pass only filtered detections
+        # Let the parent class handle the rest
+        return super().process_detr_results(results, model, frame_shape)
 
     def update(self, detections, frame_shape, table_bounds=None):
         """

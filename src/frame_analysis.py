@@ -41,7 +41,7 @@ def overlay_transparent(background, overlay, alpha):
     return output
 
 
-def analyze_frame(frame, table_viz=True, hand_viz=True, cup_viz=True, cup_search_viz=False):
+def analyze_frame(frame, table_viz=True, hand_viz=True, cup_viz=True, cup_search_viz=False, table_search_viz=False, hand_search_viz=False):
     """
     Analyze a frame using DETR to detect objects of interest in beer pong.
 
@@ -51,6 +51,8 @@ def analyze_frame(frame, table_viz=True, hand_viz=True, cup_viz=True, cup_search
         hand_viz: whether to visualize hand detection (default: True)
         cup_viz: whether to visualize cup detection (default: True)
         cup_search_viz: whether to visualize cup search boxes (default: False)
+        table_search_viz: whether to visualize table search boxes (default: False)
+        hand_search_viz: whether to visualize hand search boxes (default: False)
 
     Returns:
         annotated_frame: frame with bounding boxes and labels
@@ -124,11 +126,11 @@ def analyze_frame(frame, table_viz=True, hand_viz=True, cup_viz=True, cup_search
     # --- Draw Trackers ---
     # Draw Table only if a table has been found and table visualization is enabled
     if table_bounds_dict and table_viz:
-        annotated_frame = table_manager.draw_trackers(annotated_frame)
+        annotated_frame = table_manager.draw_trackers(annotated_frame, show_search_box=table_search_viz)
     
     # Draw Hands if hand visualization is enabled
     if hand_viz:
-        annotated_frame = hand_manager.draw_trackers(annotated_frame)
+        annotated_frame = hand_manager.draw_trackers(annotated_frame, show_search_box=hand_search_viz)
     
     # Draw Cups (including regions) if cup visualization is enabled
     if table_bounds_dict and cup_viz:

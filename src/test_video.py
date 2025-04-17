@@ -10,10 +10,10 @@ from video_process.video_preprocessor import VideoPreprocessor
 from video_process.video_processor import VideoProcessor
 
 
-def display_frame(frame, table_viz=True, hand_viz=True, cup_viz=True, cup_search_viz=False):
+def display_frame(frame, table_viz=True, hand_viz=True, cup_viz=True, cup_search_viz=False, table_search_viz=False, hand_search_viz=False):
     """Process and display frame with object detection"""
     # Analyze the frame using the updated analysis function
-    annotated_frame, detections = frame_analysis.analyze_frame(frame, table_viz, hand_viz, cup_viz, cup_search_viz)
+    annotated_frame, detections = frame_analysis.analyze_frame(frame, table_viz, hand_viz, cup_viz, cup_search_viz, table_search_viz, hand_search_viz)
 
     # Print detection information
     print("\nDetections:")
@@ -138,6 +138,18 @@ def main():
         default=False,
         help="Show cup search boxes (hidden by default)",
     )
+    parser.add_argument(
+        "--table-search-viz",
+        action="store_true",
+        default=False,
+        help="Show table search visualization (hidden by default)",
+    )
+    parser.add_argument(
+        "--hand-search-viz",
+        action="store_true",
+        default=False,
+        help="Show hand search visualization (hidden by default)",
+    )
 
     args = parser.parse_args()
 
@@ -199,7 +211,9 @@ def main():
                 table_viz=args.table_viz,
                 hand_viz=args.hand_viz,
                 cup_viz=args.cup_viz,
-                cup_search_viz=args.cup_search_viz
+                cup_search_viz=args.cup_search_viz,
+                table_search_viz=args.table_search_viz,
+                hand_search_viz=args.hand_search_viz
             )
 
             cv2.imshow("Frame", processed_frame)

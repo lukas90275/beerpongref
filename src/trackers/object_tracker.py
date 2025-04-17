@@ -24,6 +24,8 @@ class ObjectTracker(ABC):
         color=(255, 0, 0),  # Default color for visualization
         velocity_smoothing=0.7,  # Velocity smoothing factor (higher = more smoothing)
         velocity_threshold=1.0,  # Minimum threshold to consider velocity non-zero
+        position_stability_factor=0.0,  # Factor to stabilize stationary objects (0.0 = off, 1.0 = max stability)
+        use_x_distance_only=True,  # Whether to use only x-direction for distance calculations
     ):
         self.id = tracker_id if tracker_id is not None else uuid.uuid4()
         self.box = np.array(initial_box, dtype=float)
@@ -51,6 +53,17 @@ class ObjectTracker(ABC):
         self.velocity_threshold = (
             velocity_threshold  # Minimum threshold to consider velocity non-zero
         )
+        self.position_stability_factor = position_stability_factor  # How much to stabilize position
+        self.use_x_distance_only = use_x_distance_only  # Whether to use only x-direction for distance
+        
+        # Track position history for stability and smoother predictions
+        self.position_history = []
+        self.max_position_history = 5
+        self.position_history.append(self.center.copy())
+
+        # Calculate the object's width and height (used for scaled distance calculations)
+        self.width = self.box[2] - self.box[0]
+        self.height = self.box[3] - self.box[1]
 
         if self.confidence_frames >= self.min_confidence_frames:
             self.is_confident = True
@@ -64,6 +77,45 @@ class ObjectTracker(ABC):
         x2 = center[0] + width / 2
         y2 = center[1] + height / 2
         return np.array([x1, y1, x2, y2])
+        
+    def calculate_distance(self, point_a, point_b):
+        """
+        Calculate distance between two points, using only x-direction if configured.
+        Can be scaled by object size if needed.
+        
+        Args:
+            point_a: First point as (x, y) or [x, y]
+            point_b: Second point as (x, y) or [x, y]
+            
+        Returns:
+            Distance (float): Euclidean or x-only distance
+        """
+        if self.use_x_distance_only:
+            # Use only x-direction distance
+            return abs(point_a[0] - point_b[0])
+        else:
+            # Use full Euclidean distance
+            return np.linalg.norm(np.array(point_a) - np.array(point_b))
+    
+    def calculate_scaled_distance(self, point_a, point_b):
+        """
+        Calculate distance scaled by object size (width).
+        
+        Args:
+            point_a: First point as (x, y) or [x, y]
+            point_b: Second point as (x, y) or [x, y]
+            
+        Returns:
+            Scaled distance (float): Distance scaled by object width
+        """
+        raw_distance = self.calculate_distance(point_a, point_b)
+        
+        # If width is very small, avoid division by zero
+        if self.width < 1.0:
+            return raw_distance
+            
+        # Scale the distance by the object's width
+        return raw_distance / self.width
 
     def predict(self):
         """
@@ -84,6 +136,40 @@ class ObjectTracker(ABC):
         height = self.box[3] - self.box[1]
         self.box = self._update_box_from_center(predicted_center, width, height)
         self.center = predicted_center  # Update center as well
+        
+        # Update width and height properties
+        self.width = width
+        self.height = height
+        
+        # Apply position stability if enabled
+        if self.position_stability_factor > 0 and len(self.position_history) >= 2:
+            # Check if the object is moving significantly
+            # Use configured distance calculation method
+            recent_motion = 0
+            if self.use_x_distance_only:
+                recent_motion = abs(self.position_history[-1][0] - self.position_history[0][0])
+            else:
+                recent_motion = np.linalg.norm(self.position_history[-1] - self.position_history[0])
+            
+            # Define threshold based on object size
+            motion_threshold = min(5.0, self.width * 0.2)
+            
+            # If object is relatively stationary, apply stability correction
+            if recent_motion < motion_threshold:
+                # Average position from history for stability
+                stable_center = np.mean(self.position_history, axis=0)
+                
+                # Blend current predicted center with stable center
+                stabilized_center = (
+                    self.center * (1 - self.position_stability_factor) + 
+                    stable_center * self.position_stability_factor
+                )
+                
+                # Update box position based on stabilized center
+                self.box = self._update_box_from_center(stabilized_center, width, height)
+                
+                # Update center
+                self.center = stabilized_center
 
         # Define search box based on the *predicted* box
         if self.lost_frames > 0:
@@ -96,7 +182,7 @@ class ObjectTracker(ABC):
 
         # Center the search box around the predicted center
         self.search_box = self._update_box_from_center(
-            predicted_center, search_width, search_height
+            self.center, search_width, search_height
         )
 
         # Clip boxes to frame boundaries
@@ -131,8 +217,14 @@ class ObjectTracker(ABC):
         # Store previous center
         self.prev_center = self.center.copy()
 
-        # Calculate raw velocity
-        self.raw_velocity = new_center - self.center
+        # Calculate raw velocity - use the appropriate distance method
+        if self.use_x_distance_only:
+            # Only track x velocity
+            self.raw_velocity[0] = new_center[0] - self.center[0]
+            # Still calculate y velocity but with less influence
+            self.raw_velocity[1] = (new_center[1] - self.center[1]) * 0.5
+        else:
+            self.raw_velocity = new_center - self.center
 
         # Apply smoothing to reduce jitter
         self.velocity = self.velocity * self.velocity_smoothing + self.raw_velocity * (
@@ -150,8 +242,18 @@ class ObjectTracker(ABC):
         self.is_lost = False
         self.confidence_frames += 1
         self.last_confidence = detection_confidence
+        
+        # Update width and height properties
+        self.width = self.box[2] - self.box[0]
+        self.height = self.box[3] - self.box[1]
+        
         if self.confidence_frames >= self.min_confidence_frames:
             self.is_confident = True
+            
+        # Update position history
+        self.position_history.append(self.center.copy())
+        if len(self.position_history) > self.max_position_history:
+            self.position_history.pop(0)
 
     def mark_lost(self):
         """
@@ -177,14 +279,26 @@ class ObjectTracker(ABC):
         if self.lost_frames > 0:
             # Check if detection is within the search box
             detection_center = self._calculate_center(detection_box)
-            if (
-                self.search_box[0] <= detection_center[0] <= self.search_box[2]
-                and self.search_box[1] <= detection_center[1] <= self.search_box[3]
-            ):
-                # If detection is in search box, use IoU with predicted box
-                return self.calculate_iou(self.box, detection_box)
-            # Detection is outside search area
-            return 0.0
+            
+            # Use appropriate distance check based on configuration
+            if self.use_x_distance_only:
+                # Only check x-bounds for search box
+                if not (self.search_box[0] <= detection_center[0] <= self.search_box[2]):
+                    return 0.0
+                # For y, be more lenient but still check
+                if not (self.search_box[1] - self.height <= detection_center[1] <= self.search_box[3] + self.height):
+                    return 0.0
+            else:
+                # Check full bounds
+                if not (
+                    self.search_box[0] <= detection_center[0] <= self.search_box[2]
+                    and self.search_box[1] <= detection_center[1] <= self.search_box[3]
+                ):
+                    return 0.0
+                    
+            # If detection is in search box, use IoU with predicted box
+            return self.calculate_iou(self.box, detection_box)
+            
         # Normal tracking - use IoU with current box
         return self.calculate_iou(self.box, detection_box)
 
@@ -205,6 +319,8 @@ class ObjectTracker(ABC):
             "is_lost": self.is_lost,
             "last_confidence": self.last_confidence,
             "tracker_type": self.tracker_type,
+            "width": self.width,
+            "height": self.height,
         }
 
     def draw(self, frame, show_search_box=False):
