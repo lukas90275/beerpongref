@@ -10,10 +10,14 @@ from video_process.video_preprocessor import VideoPreprocessor
 from video_process.video_processor import VideoProcessor
 
 
-def display_frame(frame, table_viz=True, hand_viz=True, cup_viz=True, cup_search_viz=False, table_search_viz=False, hand_search_viz=False):
+def display_frame(frame, table_viz=True, hand_viz=True, cup_viz=True, ball_viz=True, 
+                 cup_search_viz=False, table_search_viz=False, hand_search_viz=False, ball_search_viz=True):
     """Process and display frame with object detection"""
     # Analyze the frame using the updated analysis function
-    annotated_frame, detections = frame_analysis.analyze_frame(frame, table_viz, hand_viz, cup_viz, cup_search_viz, table_search_viz, hand_search_viz)
+    annotated_frame, detections = frame_analysis.analyze_frame(
+        frame, table_viz, hand_viz, cup_viz, ball_viz, 
+        cup_search_viz, table_search_viz, hand_search_viz, ball_search_viz
+    )
 
     # Print detection information
     print("\nDetections:")
@@ -48,27 +52,28 @@ def display_frame(frame, table_viz=True, hand_viz=True, cup_viz=True, cup_search
     )
     print(f"Hands tracked: {hands_tracked_count} (Confident: {confident_hands_count})")
 
-    # Comment out ball tracking output
-    """
-    # Print information about balls in hands
-    consistent_balls = [
-        ball for ball in detections["balls_in_hand"] if ball["is_consistent"]
-    ]
-    print(
-        f"Balls in hands: {len(detections['balls_in_hand'])} (Consistent: {len(consistent_balls)})"
-    )
-
-    if consistent_balls:
-        print("\nConsistent Balls in Hands:")
-        print("-------------------------")
-        for ball in consistent_balls:
-            method = ball.get("method", "unknown")
-            merged_count = ball.get("merged_count", 1)
-            merged_info = f", merged×{merged_count}" if merged_count > 1 else ""
-            print(
-                f"Ball {ball['id']} ({method}{merged_info}): {ball['consecutive_detections']} consecutive frames"
-            )
-    """
+    # Ball tracking information
+    balls_tracked = detections.get("balls_tracked", [])
+    confident_balls = sum(1 for ball in balls_tracked if ball["is_confident"])
+    
+    print(f"Balls tracked: {len(balls_tracked)} (Confident: {confident_balls})")
+    
+    # Print details of tracked balls
+    if balls_tracked:
+        for ball in balls_tracked:
+            ball_id = ball.get("id", "unknown")
+            diameter = ball.get("diameter", 0)
+            confidence = ball.get("confidence_frames", 0)
+            velocity = ball.get("velocity", [0, 0])
+            velocity_mag = (velocity[0]**2 + velocity[1]**2)**0.5
+            status = []
+            
+            if ball.get("is_confident", False):
+                status.append("Confident")
+                
+            status_str = ", ".join(status) if status else "Tracking"
+            
+            print(f"  Ball {ball_id}: {diameter:.1f}px, vel: {velocity_mag:.1f} - {status_str}")
 
     return annotated_frame
 
@@ -133,6 +138,12 @@ def main():
         help="Enable cup visualization",
     )
     parser.add_argument(
+        "--ball-viz",
+        action="store_true",
+        default=True,
+        help="Enable ball visualization",
+    )
+    parser.add_argument(
         "--cup-search-viz",
         action="store_true",
         default=False,
@@ -149,6 +160,12 @@ def main():
         action="store_true",
         default=False,
         help="Show hand search visualization (hidden by default)",
+    )
+    parser.add_argument(
+        "--ball-search-viz",
+        action="store_true",
+        default=False,
+        help="Show ball search regions and trajectories (enabled by default)",
     )
 
     args = parser.parse_args()
@@ -211,9 +228,11 @@ def main():
                 table_viz=args.table_viz,
                 hand_viz=args.hand_viz,
                 cup_viz=args.cup_viz,
+                ball_viz=args.ball_viz,
                 cup_search_viz=args.cup_search_viz,
                 table_search_viz=args.table_search_viz,
-                hand_search_viz=args.hand_search_viz
+                hand_search_viz=args.hand_search_viz,
+                ball_search_viz=args.ball_search_viz
             )
 
             cv2.imshow("Frame", processed_frame)

@@ -2,6 +2,7 @@ import cv2
 import torch
 from transformers import DetrForObjectDetection, DetrImageProcessor
 
+from tracking_managers.ball_tracker_manager import BallTrackerManager
 from tracking_managers.cup_tracker_manager import CupTrackerManager
 from tracking_managers.hand_tracker_manager import HandTrackerManager
 from tracking_managers.table_tracker_manager import TableTrackerManager
@@ -20,6 +21,14 @@ tracker_managers = {
         detection_threshold=0.4
     ),
     "hand": HandTrackerManager(iou_threshold=0.2, max_lost_frames=15),
+    "ball": BallTrackerManager(
+        iou_threshold=0.3,
+        min_confidence_frames=1,
+        max_lost_frames=15,
+        detection_threshold=0.3,
+        size_filtering=True,
+        position_stability_factor=0.0,
+    ),
 }
 
 # Initialize the ball in hand detector
@@ -41,7 +50,8 @@ def overlay_transparent(background, overlay, alpha):
     return output
 
 
-def analyze_frame(frame, table_viz=True, hand_viz=True, cup_viz=True, cup_search_viz=False, table_search_viz=False, hand_search_viz=False):
+def analyze_frame(frame, table_viz=True, hand_viz=True, cup_viz=True, ball_viz=True, 
+                 cup_search_viz=False, table_search_viz=False, hand_search_viz=False, ball_search_viz=True):
     """
     Analyze a frame using DETR to detect objects of interest in beer pong.
 
@@ -50,9 +60,11 @@ def analyze_frame(frame, table_viz=True, hand_viz=True, cup_viz=True, cup_search
         table_viz: whether to visualize table detection (default: True)
         hand_viz: whether to visualize hand detection (default: True)
         cup_viz: whether to visualize cup detection (default: True)
+        ball_viz: whether to visualize ball detection (default: True)
         cup_search_viz: whether to visualize cup search boxes (default: False)
         table_search_viz: whether to visualize table search boxes (default: False)
         hand_search_viz: whether to visualize hand search boxes (default: False)
+        ball_search_viz: whether to visualize ball search/detection regions (default: True)
 
     Returns:
         annotated_frame: frame with bounding boxes and labels
@@ -86,7 +98,7 @@ def analyze_frame(frame, table_viz=True, hand_viz=True, cup_viz=True, cup_search
         "table_tracker": None,
         "hands_tracked": [],
         "cups_tracked": [],
-        "balls_in_hand": [], # Placeholder for future ball detection
+        "balls_tracked": [],
     }
 
     # Create a copy for drawing
@@ -122,6 +134,45 @@ def analyze_frame(frame, table_viz=True, hand_viz=True, cup_viz=True, cup_search
         detections["cups_tracked"] = cup_manager.process_detr_results(
             results, model, frame.shape[:2], table_bounds_dict
         )
+        
+    # 4. Process Balls (using hand regions)
+    ball_manager = tracker_managers["ball"]
+    # Process raw detections for debugging
+    ball_detections = ball_manager.process_detr_results(results, model, frame.shape[:2])
+    
+    # Print debug info about ball detections
+    if len(ball_detections) > 0:
+        print(f"Found {len(ball_detections)} potential balls")
+        
+    # Use the ball manager's specialized method that takes hand trackers
+    detections["balls_tracked"] = ball_manager.update_with_hand_trackers(
+        detections["hands_tracked"],
+        ball_detections,
+        frame.shape[:2]
+    )
+    
+    # Debug visualization for all potential ball detections
+    for detection in ball_detections:
+        if "box" in detection:
+            box = detection["box"]
+            confidence = detection.get("confidence", 0)
+            # Draw raw detections in magenta
+            cv2.rectangle(
+                annotated_frame,
+                (box[0], box[1]),
+                (box[2], box[3]),
+                (255, 0, 255),  # Magenta
+                1
+            )
+            cv2.putText(
+                annotated_frame,
+                f"Ball? {confidence:.2f}",
+                (box[0], box[1] - 5),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.4,
+                (255, 0, 255),
+                1
+            )
 
     # --- Draw Trackers ---
     # Draw Table only if a table has been found and table visualization is enabled
@@ -137,10 +188,11 @@ def analyze_frame(frame, table_viz=True, hand_viz=True, cup_viz=True, cup_search
         if cup_search_viz:
             annotated_frame = cup_manager.draw_regions(annotated_frame)
         annotated_frame = cup_manager.draw_trackers(annotated_frame, show_search_box=cup_search_viz)
-
-    # Comment out ball-in-hand detection
-    """
-    # Detection for ball-in-hand would go here in the future
-    """
+        
+    # Draw Balls if ball visualization is enabled
+    if ball_viz:
+        if ball_search_viz:
+            annotated_frame = ball_manager.draw_regions(annotated_frame)
+        annotated_frame = ball_manager.draw_trackers(annotated_frame, show_search_box=ball_search_viz)
 
     return annotated_frame, detections
