@@ -133,7 +133,8 @@ class BallTrackerManager(TrackerManager):
             source_region_id=source_region_id,
             position_stability_factor=self.position_stability_factor,
             min_confidence_frames=self.min_confidence_frames,
-            max_lost_frames=self.max_lost_frames
+            max_lost_frames=self.max_lost_frames,
+            search_expansion_factor=2.5  # Use larger search boxes for balls for better visualization
         )
         
         # Force balls to be confident immediately for better tracking continuity
@@ -342,6 +343,28 @@ class BallTrackerManager(TrackerManager):
         
         return frame 
 
+    def _update_search_boxes(self):
+        """
+        Update search boxes for all trackers to ensure they're visible.
+        Call this right before drawing to ensure search boxes are properly sized.
+        """
+        for tracker in self.trackers:
+            # Calculate expanded search box based on ball size
+            width = tracker.box[2] - tracker.box[0]
+            height = tracker.box[3] - tracker.box[1]
+            
+            # Use a larger expansion factor for visualization
+            search_width = width * 2.5
+            search_height = height * 2.5
+            
+            # Center the search box around the current center
+            tracker.search_box = tracker._update_box_from_center(
+                tracker.center, search_width, search_height
+            )
+            
+            # Clip to frame boundaries
+            tracker.search_box = tracker._clip_to_frame(tracker.search_box)
+
     def draw_trackers(self, frame, show_search_box=False):
         """
         Draw all trackers with enhanced visibility for balls.
@@ -353,41 +376,13 @@ class BallTrackerManager(TrackerManager):
         Returns:
             Frame with trackers drawn
         """
-        # For ball detection, make lines thicker and brighter
+        # Update search boxes for better visualization if showing them
+        if show_search_box:
+            self._update_search_boxes()
+            
+        # Draw each tracker using its own draw method
         for tracker in self.trackers:
-            b = tracker.box.astype(int)
-            
-            # Draw brighter yellow outline
-            cv2.rectangle(
-                frame,
-                (b[0], b[1]),
-                (b[2], b[3]),
-                (0, 255, 255),  # Bright yellow
-                2  # Thicker line
-            )
-            
-            # Draw search box if requested
-            if show_search_box:
-                sb = tracker.search_box.astype(int)
-                cv2.rectangle(
-                    frame,
-                    (sb[0], sb[1]),
-                    (sb[2], sb[3]),
-                    (0, 200, 255),  # Orange for search
-                    1,
-                    cv2.LINE_AA
-                )
-            
-            # Draw ball info
-            cv2.putText(
-                frame,
-                "Ball",
-                (b[0], b[1] - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (0, 255, 255),  # Yellow text
-                2
-            )
+            frame = tracker.draw(frame, show_search_box)
         
         return frame 
 

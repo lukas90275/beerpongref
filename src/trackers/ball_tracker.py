@@ -77,6 +77,28 @@ class BallTracker(ObjectTracker):
         """
         b = self.box.astype(int)
         
+        # Draw search box with higher visibility if requested
+        if show_search_box:
+            sb = self.search_box.astype(int)
+            cv2.rectangle(
+                frame,
+                (sb[0], sb[1]),
+                (sb[2], sb[3]),
+                (0, 0, 255),  # Change to RED for high visibility
+                2,  # Thicker line
+                cv2.LINE_AA
+            )
+            # Add search box label with high visibility
+            cv2.putText(
+                frame,
+                "Ball Search Area",
+                (sb[0], sb[1] - 5),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 0, 255),  # RED text
+                2
+            )
+        
         # Draw brighter yellow outline
         cv2.rectangle(
             frame,
@@ -85,18 +107,6 @@ class BallTracker(ObjectTracker):
             (0, 255, 255),  # Bright yellow
             2  # Thicker line
         )
-        
-        # Draw search box if requested
-        if show_search_box:
-            sb = self.search_box.astype(int)
-            cv2.rectangle(
-                frame,
-                (sb[0], sb[1]),
-                (sb[2], sb[3]),
-                (0, 200, 255),  # Orange
-                1,
-                cv2.LINE_AA
-            )
         
         # Draw ball label
         cv2.putText(
