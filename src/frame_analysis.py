@@ -104,95 +104,59 @@ def analyze_frame(frame, table_viz=True, hand_viz=True, cup_viz=True, ball_viz=T
     # Create a copy for drawing
     annotated_frame = frame.copy()
 
-    # --- Process Trackers ---
-    table_bounds = None
-    table_bounds_dict = None
-
+    # --- Process Trackers in Dependency Order ---
+    
     # 1. Process Table First (dependency for cups)
-    table_manager = tracker_managers["table"]
-    detections["table_tracker"] = table_manager.process_detr_results(
+    detections["table_tracker"] = tracker_managers["table"].process_detr_results(
         results, model, frame.shape[:2]
     )
-    table_bounds = table_manager.get_table_bounds()
-    if table_bounds:
+    
+    # Get the table bounds for cup detection
+    table_bounds_dict = None
+    table_tracker = tracker_managers["table"].get_primary_tracker()
+    if table_tracker and hasattr(table_tracker, 'box') and table_tracker.box is not None:
+        bounds = table_tracker.box
         table_bounds_dict = {
-            "x1": table_bounds[0],
-            "y1": table_bounds[1],
-            "x2": table_bounds[2],
-            "y2": table_bounds[3],
+            "x1": bounds[0],
+            "y1": bounds[1],
+            "x2": bounds[2],
+            "y2": bounds[3],
         }
 
     # 2. Process Hands
-    hand_manager = tracker_managers["hand"]
-    detections["hands_tracked"] = hand_manager.process_hand_detector_results(
-        frame, frame.shape[:2]
+    detections["hands_tracked"] = tracker_managers["hand"].process_detr_results(
+        None, None, frame.shape[:2], frame=frame
     )
 
-    # 3. Process Cups (only if table bounds exist)
-    cup_manager = tracker_managers["cup"]
-    if table_bounds_dict:
-        detections["cups_tracked"] = cup_manager.process_detr_results(
-            results, model, frame.shape[:2], table_bounds_dict
-        )
-        
-    # 4. Process Balls (using hand regions)
-    ball_manager = tracker_managers["ball"]
-    # Process raw detections for debugging
-    ball_detections = ball_manager.process_detr_results(results, model, frame.shape[:2])
-    
-    # Print debug info about ball detections
-    if len(ball_detections) > 0:
-        print(f"Found {len(ball_detections)} potential balls")
-        
-    # Use the ball manager's specialized method that takes hand trackers
-    detections["balls_tracked"] = ball_manager.update_with_hand_trackers(
-        detections["hands_tracked"],
-        ball_detections,
-        frame.shape[:2]
+    # 3. Process Cups (using table bounds if available)
+    detections["cups_tracked"] = tracker_managers["cup"].process_detr_results(
+        results, model, frame.shape[:2], table_bounds=table_bounds_dict
     )
-    
-    # Debug visualization for all potential ball detections
-    for detection in ball_detections:
-        if "box" in detection:
-            box = detection["box"]
-            confidence = detection.get("confidence", 0)
-            # Draw raw detections in magenta
-            cv2.rectangle(
-                annotated_frame,
-                (box[0], box[1]),
-                (box[2], box[3]),
-                (255, 0, 255),  # Magenta
-                1
-            )
-            cv2.putText(
-                annotated_frame,
-                f"Ball? {confidence:.2f}",
-                (box[0], box[1] - 5),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.4,
-                (255, 0, 255),
-                1
-            )
+        
+    # 4. Process Balls (using hand trackers for regions)  
+    detections["balls_tracked"] = tracker_managers["ball"].process_detr_results(
+        results, model, frame.shape[:2], hand_trackers=detections["hands_tracked"]
+    )
 
     # --- Draw Trackers ---
-    # Draw Table only if a table has been found and table visualization is enabled
-    if table_bounds_dict and table_viz:
-        annotated_frame = table_manager.draw_trackers(annotated_frame, show_search_box=table_search_viz)
+    # Draw Table only if table visualization is enabled
+    if table_viz and table_tracker:
+        annotated_frame = tracker_managers["table"].draw_trackers(annotated_frame, show_search_box=table_search_viz)
     
     # Draw Hands if hand visualization is enabled
     if hand_viz:
-        annotated_frame = hand_manager.draw_trackers(annotated_frame, show_search_box=hand_search_viz)
+        annotated_frame = tracker_managers["hand"].draw_trackers(annotated_frame, show_search_box=hand_search_viz)
     
     # Draw Cups (including regions) if cup visualization is enabled
-    if table_bounds_dict and cup_viz:
+    if cup_viz:
         if cup_search_viz:
-            annotated_frame = cup_manager.draw_regions(annotated_frame)
-        annotated_frame = cup_manager.draw_trackers(annotated_frame, show_search_box=cup_search_viz)
+            annotated_frame = tracker_managers["cup"].draw_regions(annotated_frame, show_expected_size=True)
+        annotated_frame = tracker_managers["cup"].draw_trackers(annotated_frame, show_search_box=cup_search_viz)
         
     # Draw Balls if ball visualization is enabled
     if ball_viz:
         if ball_search_viz:
-            annotated_frame = ball_manager.draw_regions(annotated_frame)
-        annotated_frame = ball_manager.draw_trackers(annotated_frame, show_search_box=ball_search_viz)
+            annotated_frame = tracker_managers["ball"].draw_regions(annotated_frame, show_expected_size=True)
+        annotated_frame = tracker_managers["ball"].draw_trackers(annotated_frame, show_search_box=ball_search_viz)
 
     return annotated_frame, detections
