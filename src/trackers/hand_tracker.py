@@ -1,134 +1,88 @@
 import cv2
 import numpy as np
 
-from trackers.object_tracker import ObjectTracker
+from trackers.object_tracker import ObjectTracker, TrackerConfig
 
 
 class HandTracker(ObjectTracker):
     """
     Specific implementation for tracking a hand.
-    Uses parent class for matching score (IoU). Stores handedness.
+    Defines a region around the hand where balls might be detected.
     """
 
     def __init__(
         self, 
         initial_box, 
         frame_shape, 
-        hand_type, 
         initial_confidence, 
-        position_stability_factor=0.3,  # Moderate stability for hands which move
-        use_x_distance_only=True,  # Use x-direction for hand distance measurements
-        ball_region_expansion=1.3,  # Factor to expand hand box for ball detection region
+        ball_region_expansion=1.3,
         **kwargs
     ):
+        config = TrackerConfig(
+            tracker_type="Hand",
+            color=(255, 0, 0),  # Blue in BGR format
+            position_stability_factor=0.3,  # Moderate stability for hands which move
+            use_x_distance_only=True,  # Use x-direction for hand distance measurements
+            velocity_smoothing=0.8,  # Higher smoothing for hands
+            velocity_threshold=2.0,  # Higher threshold to reduce jitter
+        )
         super().__init__(
             initial_box,
             frame_shape,
             initial_confidence=initial_confidence,
-            tracker_type="Hand",
-            color=(255, 0, 0),
-            position_stability_factor=position_stability_factor,
-            velocity_smoothing=0.8,  # Higher smoothing for hands
-            velocity_threshold=2.0,  # Higher threshold to reduce jitter
-            use_x_distance_only=use_x_distance_only,
+            config=config,
             **kwargs
         )
-        self.hand_type = hand_type
-        self.ball_region_expansion = ball_region_expansion
-        self.ball_region = self._calculate_ball_region()
         
-        # Track motion state for gesture detection
-        self.is_moving = False
-        self.motion_threshold = max(5.0, self.width * 0.15)  # Scale threshold by hand size
-
+        # Hand-specific properties
+        self.ball_region_expansion = ball_region_expansion
+        self.ball_region = None
+        
+        # Initialize ball region
+        if self.ball_region_expansion is not None:
+            self.ball_region = self._calculate_ball_region()
+            
     def _calculate_ball_region(self):
         """
         Calculate a region around the hand where balls might be detected.
-        Expands the hand box by the ball_region_expansion factor.
         """
+        if self.ball_region_expansion is None:
+            return None
+            
         center = self.center.copy()
         width = self.width * self.ball_region_expansion
         height = self.height * self.ball_region_expansion
         
-        # For hand regions, we're more interested in the area in front of and above the hand
-        # Adjust the region based on hand type
-        if self.hand_type == "left":
-            # Expand more to the right for left hand
-            x1 = center[0] - width * 0.3
-            x2 = center[0] + width * 0.7
-        else:
-            # Expand more to the left for right hand
-            x1 = center[0] - width * 0.7
-            x2 = center[0] + width * 0.3
+        # Create a symmetrical region
+        x1 = center[0] - width * 0.5
+        x2 = center[0] + width * 0.5
         
-        # Expand more upward
+        # Expand more upward than downward for hand tracking
         y1 = center[1] - height * 0.7
         y2 = center[1] + height * 0.3
         
         # Create and clip the region
         region = np.array([x1, y1, x2, y2])
         return self._clip_to_frame(region)
-
-    def update(self, detection_box, detection_confidence=1.0, hand_type=None):
-        """
-        Update tracker, including handedness if provided.
-        Also update motion state for the hand and ball detection region.
-        """
-        # Store previous position for motion calculation
-        prev_position = self.center.copy() if hasattr(self, 'center') else None
         
-        # Call parent update
-        super().update(detection_box, detection_confidence)
-        
-        # Update handedness if provided
-        if hand_type and hand_type != self.hand_type:
-            self.hand_type = hand_type
+    def _custom_update(self, **kwargs):
+        """Update ball region when hand position changes"""
+        if self.ball_region_expansion is not None:
+            self.ball_region = self._calculate_ball_region()
+    
+    def _custom_predict(self):
+        """Update ball region during prediction steps"""
+        if self.ball_region_expansion is not None:
+            self.ball_region = self._calculate_ball_region()
             
-        # Update motion state if we have previous position, using appropriate distance method
-        if prev_position is not None:
-            if self.use_x_distance_only:
-                motion = abs(self.center[0] - prev_position[0])
-            else:
-                motion = np.linalg.norm(self.center - prev_position)
-                
-            # Scale motion threshold by hand size
-            self.motion_threshold = max(5.0, self.width * 0.15)
-            self.is_moving = motion > self.motion_threshold
-        
-        # Update ball detection region
-        self.ball_region = self._calculate_ball_region()
-
-    def get_state(self):
-        """Add hand_type and ball_region to the state dictionary."""
-        state = super().get_state()
-        state["hand_type"] = self.hand_type
-        state["is_moving"] = self.is_moving
-        state["motion_threshold"] = self.motion_threshold
-        state["ball_region"] = self.ball_region.astype(int).tolist()
-        return state
-        
-    def draw(self, frame, show_search_box=False):
-        """
-        Draw the hand tracker's state onto the frame.
-        Add hand-specific visualizations.
-        """
-        # Call parent draw method first
-        frame = super().draw(frame, show_search_box)
-        
-        # Add hand type label
-        b = self.box.astype(int)
-        cv2.putText(
-            frame,
-            f"{self.hand_type}",
-            (b[0], b[1] - 30),  # Position above tracker_type label
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (0, 255, 0) if self.is_confident else (0, 0, 255),
-            2,
-        )
-        
-        # Draw ball detection region if showing search boxes
-        if show_search_box:
+    def _extend_state(self, state):
+        """Add ball region to state dictionary"""
+        if self.ball_region is not None:
+            state["ball_region"] = self.ball_region.astype(int).tolist()
+            
+    def _custom_draw(self, frame, show_search_box):
+        """Draw ball region if showing search box"""
+        if show_search_box and self.ball_region is not None:
             br = self.ball_region.astype(int)
             cv2.rectangle(
                 frame,
@@ -146,6 +100,4 @@ class HandTracker(ObjectTracker):
                 0.4,
                 (0, 255, 255),
                 1,
-            )
-        
-        return frame
+            ) 

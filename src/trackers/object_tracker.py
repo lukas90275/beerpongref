@@ -1,71 +1,110 @@
 import uuid  # For unique IDs
 from abc import ABC
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import cv2
 import numpy as np
 
 
+class TrackerConfig:
+    """Configuration object for ObjectTracker to reduce parameter explosion"""
+    
+    def __init__(
+        self,
+        tracker_type="Object",
+        color=(255, 0, 0),
+        min_confidence_frames=3,
+        max_lost_frames=5,
+        search_expansion_factor=1.5,
+        velocity_smoothing=0.7,
+        velocity_threshold=1.0,
+        position_stability_factor=0.0,
+        use_x_distance_only=True,
+        trajectory_len=0,
+        detect_aspect_ratio_change=False,
+        aspect_ratio_change_factor=1.5,
+        aspect_ratio_history_len=5,
+        search_region_bounds=None,
+        source_region_id=None,
+    ):
+        # Basic tracker identification
+        self.tracker_type = tracker_type
+        self.color = color
+        
+        # Core tracking parameters
+        self.min_confidence_frames = min_confidence_frames
+        self.max_lost_frames = max_lost_frames
+        self.search_expansion_factor = search_expansion_factor
+        
+        # Motion and stability parameters
+        self.velocity_smoothing = velocity_smoothing
+        self.velocity_threshold = velocity_threshold
+        self.position_stability_factor = position_stability_factor
+        self.use_x_distance_only = use_x_distance_only
+        
+        # Feature flags and specialized parameters
+        self.trajectory_len = trajectory_len
+        self.detect_aspect_ratio_change = detect_aspect_ratio_change
+        self.aspect_ratio_change_factor = aspect_ratio_change_factor 
+        self.aspect_ratio_history_len = aspect_ratio_history_len
+        self.search_region_bounds = search_region_bounds
+        self.source_region_id = source_region_id
+
+
 class ObjectTracker(ABC):
     """
-    Abstract base class for tracking objects across frames.
+    Unified tracking class for all object types.
     Manages state like box, velocity, confidence, and lost frames.
+    Supports specialized features through configuration and overridable methods.
     """
 
     def __init__(
         self,
         initial_box,
         frame_shape,
-        tracker_id=None,  # Allow assigning specific ID or generate one
-        min_confidence_frames=3,
-        max_lost_frames=5,
-        search_expansion_factor=1.5,
-        initial_confidence=1.0,  # Add initial confidence if available
-        tracker_type="Object",  # Added tracker type for labeling
-        color=(255, 0, 0),  # Default color for visualization
-        velocity_smoothing=0.7,  # Velocity smoothing factor (higher = more smoothing)
-        velocity_threshold=1.0,  # Minimum threshold to consider velocity non-zero
-        position_stability_factor=0.0,  # Factor to stabilize stationary objects (0.0 = off, 1.0 = max stability)
-        use_x_distance_only=True,  # Whether to use only x-direction for distance calculations
+        tracker_id=None,
+        initial_confidence=1.0,
+        config=None,
+        **kwargs
     ):
+        # Allow passing either a TrackerConfig object or keyword arguments
+        self.config = config if config is not None else TrackerConfig(**kwargs)
+        
         self.id = tracker_id if tracker_id is not None else uuid.uuid4()
         self.box = np.array(initial_box, dtype=float)
         self.velocity = np.zeros(2, dtype=float)
-        self.raw_velocity = np.zeros(
-            2, dtype=float
-        )  # Store raw velocity before smoothing
+        self.raw_velocity = np.zeros(2, dtype=float)
         self.center = self._calculate_center(self.box)
-        self.prev_center = (
-            self.center.copy()
-        )  # Store previous center for velocity calculation
+        self.prev_center = self.center.copy()
         self.lost_frames = 0
         self.confidence_frames = 1  # Starts at 1
         self.is_confident = False
         self.is_lost = False
         self.frame_shape = frame_shape
-        self.min_confidence_frames = min_confidence_frames
-        self.max_lost_frames = max_lost_frames
-        self.search_expansion_factor = search_expansion_factor
         self.search_box = self.box.copy()  # Initial search box is just the box
-        self.last_confidence = initial_confidence  # Store confidence of last detection
-        self.tracker_type = tracker_type  # Type of tracker (e.g., "Hand", "Table")
-        self.color = color  # Color for visualization
-        self.velocity_smoothing = velocity_smoothing  # Higher = more smoothing
-        self.velocity_threshold = (
-            velocity_threshold  # Minimum threshold to consider velocity non-zero
-        )
-        self.position_stability_factor = position_stability_factor  # How much to stabilize position
-        self.use_x_distance_only = use_x_distance_only  # Whether to use only x-direction for distance
+        self.last_confidence = initial_confidence
         
-        # Track position history for stability and smoother predictions
-        self.position_history = []
-        self.max_position_history = 5
-        self.position_history.append(self.center.copy())
-
-        # Calculate the object's width and height (used for scaled distance calculations)
+        # Calculate the object's width and height
         self.width = self.box[2] - self.box[0]
         self.height = self.box[3] - self.box[1]
 
-        if self.confidence_frames >= self.min_confidence_frames:
+        # Initialize position history for stability and predictions
+        self.position_history = []
+        self.max_position_history = 5
+        self.position_history.append(self.center.copy())
+        
+        # Initialize trajectory tracking if enabled
+        self.trajectory_positions = []
+        if self.config.trajectory_len > 0:
+            self.trajectory_positions.append(self.center.copy())
+            
+        # Initialize aspect ratio tracking if enabled
+        self.is_standing = True
+        if self.config.detect_aspect_ratio_change:
+            self.original_aspect_ratio = self.width / self.height if self.height > 0 else 1.0
+            self.aspect_ratio_history = [self.original_aspect_ratio]
+
+        if self.confidence_frames >= self.config.min_confidence_frames:
             self.is_confident = True
 
     def _calculate_center(self, box):
@@ -90,7 +129,7 @@ class ObjectTracker(ABC):
         Returns:
             Distance (float): Euclidean or x-only distance
         """
-        if self.use_x_distance_only:
+        if self.config.use_x_distance_only:
             # Use only x-direction distance
             return abs(point_a[0] - point_b[0])
         else:
@@ -117,6 +156,38 @@ class ObjectTracker(ABC):
         # Scale the distance by the object's width
         return raw_distance / self.width
 
+    def _clip_to_frame(self, box):
+        """Clip box coordinates to stay within frame boundaries."""
+        h, w = self.frame_shape[:2]
+        box[0] = np.clip(box[0], 0, w - 1)
+        box[1] = np.clip(box[1], 0, h - 1)
+        box[2] = np.clip(box[2], 0, w - 1)
+        box[3] = np.clip(box[3], 0, h - 1)
+        # Ensure x1 < x2 and y1 < y2
+        if box[0] >= box[2]:
+            box[2] = box[0] + 1
+        if box[1] >= box[3]:
+            box[3] = box[1] + 1
+        box[2] = np.clip(box[2], 0, w - 1)  # Clip again if adjusted
+        box[3] = np.clip(box[3], 0, h - 1)
+        return box
+        
+    def _clip_to_bounds(self, box, bounds):
+        """Clip box coordinates to stay within specified bounds."""
+        if bounds is None:
+            return box
+        box[0] = np.clip(box[0], bounds[0], bounds[2])
+        box[1] = np.clip(box[1], bounds[1], bounds[3])
+        box[2] = np.clip(box[2], bounds[0], bounds[2])
+        box[3] = np.clip(box[3], bounds[1], bounds[3])
+        # Ensure x1 < x2 and y1 < y2 after clipping
+        if box[0] >= box[2]: box[2] = box[0] + 1
+        if box[1] >= box[3]: box[3] = box[1] + 1
+        # Clip again to ensure adjustment didn't exceed bounds
+        box[2] = np.clip(box[2], bounds[0], bounds[2]) 
+        box[3] = np.clip(box[3], bounds[1], bounds[3])
+        return box
+
     def predict(self):
         """
         Predict the bounding box and search area for the next frame based on velocity.
@@ -142,11 +213,11 @@ class ObjectTracker(ABC):
         self.height = height
         
         # Apply position stability if enabled
-        if self.position_stability_factor > 0 and len(self.position_history) >= 2:
+        if self.config.position_stability_factor > 0 and len(self.position_history) >= 2:
             # Check if the object is moving significantly
             # Use configured distance calculation method
             recent_motion = 0
-            if self.use_x_distance_only:
+            if self.config.use_x_distance_only:
                 recent_motion = abs(self.position_history[-1][0] - self.position_history[0][0])
             else:
                 recent_motion = np.linalg.norm(self.position_history[-1] - self.position_history[0])
@@ -161,8 +232,8 @@ class ObjectTracker(ABC):
                 
                 # Blend current predicted center with stable center
                 stabilized_center = (
-                    self.center * (1 - self.position_stability_factor) + 
-                    stable_center * self.position_stability_factor
+                    self.center * (1 - self.config.position_stability_factor) + 
+                    stable_center * self.config.position_stability_factor
                 )
                 
                 # Update box position based on stabilized center
@@ -174,11 +245,11 @@ class ObjectTracker(ABC):
         # Define search box based on the *predicted* box
         if self.lost_frames > 0:
             # Expand search area if object was lost
-            search_width = width * (self.search_expansion_factor**self.lost_frames)
-            search_height = height * (self.search_expansion_factor**self.lost_frames)
+            search_width = width * (self.config.search_expansion_factor**self.lost_frames)
+            search_height = height * (self.config.search_expansion_factor**self.lost_frames)
         else:
-            search_width = width * self.search_expansion_factor
-            search_height = height * self.search_expansion_factor
+            search_width = width * self.config.search_expansion_factor
+            search_height = height * self.config.search_expansion_factor
 
         # Center the search box around the predicted center
         self.search_box = self._update_box_from_center(
@@ -188,26 +259,23 @@ class ObjectTracker(ABC):
         # Clip boxes to frame boundaries
         self.box = self._clip_to_frame(self.box)
         self.search_box = self._clip_to_frame(self.search_box)
+        
+        # Clip search box to region bounds if specified (for cup tracking)
+        if self.config.search_region_bounds is not None:
+            self.search_box = self._clip_to_bounds(
+                self.search_box, self.config.search_region_bounds
+            )
+            
+        # Hook for subclasses to customize prediction
+        self._custom_predict()
 
         return self.box.astype(int), self.search_box.astype(int)
+        
+    def _custom_predict(self):
+        """Hook for subclasses to add custom prediction logic without overriding the full predict method"""
+        pass
 
-    def _clip_to_frame(self, box):
-        """Clip box coordinates to stay within frame boundaries."""
-        h, w = self.frame_shape[:2]
-        box[0] = np.clip(box[0], 0, w - 1)
-        box[1] = np.clip(box[1], 0, h - 1)
-        box[2] = np.clip(box[2], 0, w - 1)
-        box[3] = np.clip(box[3], 0, h - 1)
-        # Ensure x1 < x2 and y1 < y2
-        if box[0] >= box[2]:
-            box[2] = box[0] + 1
-        if box[1] >= box[3]:
-            box[3] = box[1] + 1
-        box[2] = np.clip(box[2], 0, w - 1)  # Clip again if adjusted
-        box[3] = np.clip(box[3], 0, h - 1)
-        return box
-
-    def update(self, detection_box, detection_confidence=1.0):
+    def update(self, detection_box, detection_confidence=1.0, **kwargs):
         """
         Update the tracker state with a new assigned detection.
         """
@@ -218,7 +286,7 @@ class ObjectTracker(ABC):
         self.prev_center = self.center.copy()
 
         # Calculate raw velocity - use the appropriate distance method
-        if self.use_x_distance_only:
+        if self.config.use_x_distance_only:
             # Only track x velocity
             self.raw_velocity[0] = new_center[0] - self.center[0]
             # Still calculate y velocity but with less influence
@@ -227,12 +295,12 @@ class ObjectTracker(ABC):
             self.raw_velocity = new_center - self.center
 
         # Apply smoothing to reduce jitter
-        self.velocity = self.velocity * self.velocity_smoothing + self.raw_velocity * (
-            1 - self.velocity_smoothing
+        self.velocity = self.velocity * self.config.velocity_smoothing + self.raw_velocity * (
+            1 - self.config.velocity_smoothing
         )
 
         # Apply threshold to velocity to reduce small jitter
-        mask = np.abs(self.velocity) < self.velocity_threshold
+        mask = np.abs(self.velocity) < self.config.velocity_threshold
         self.velocity[mask] = 0.0
 
         # Update state
@@ -247,13 +315,45 @@ class ObjectTracker(ABC):
         self.width = self.box[2] - self.box[0]
         self.height = self.box[3] - self.box[1]
         
-        if self.confidence_frames >= self.min_confidence_frames:
+        if self.confidence_frames >= self.config.min_confidence_frames:
             self.is_confident = True
             
         # Update position history
         self.position_history.append(self.center.copy())
         if len(self.position_history) > self.max_position_history:
             self.position_history.pop(0)
+            
+        # Update trajectory if enabled
+        if self.config.trajectory_len > 0:
+            self.trajectory_positions.append(self.center.copy())
+            if len(self.trajectory_positions) > self.config.trajectory_len:
+                self.trajectory_positions.pop(0)
+                
+        # Update aspect ratio history if enabled
+        if self.config.detect_aspect_ratio_change and self.height > 0:
+            current_aspect = self.width / self.height
+            self.aspect_ratio_history.append(current_aspect)
+            
+            if len(self.aspect_ratio_history) > self.config.aspect_ratio_history_len:
+                self.aspect_ratio_history.pop(0)
+                
+            # Analyze aspect ratio changes to detect if object has changed state (e.g., cup knocked over)
+            if len(self.aspect_ratio_history) >= 3:
+                avg_recent_aspect = np.mean(self.aspect_ratio_history[-3:])
+                
+                # If aspect ratio has changed significantly, state might have changed
+                if self.is_standing and avg_recent_aspect > self.original_aspect_ratio * self.config.aspect_ratio_change_factor:
+                    self.is_standing = False
+                # If aspect ratio is back to normal, state might have reverted
+                elif not self.is_standing and abs(avg_recent_aspect - self.original_aspect_ratio) < 0.2:
+                    self.is_standing = True
+            
+        # Call hook for subclass-specific updates
+        self._custom_update(**kwargs)
+
+    def _custom_update(self, **kwargs):
+        """Hook for subclasses to add custom update logic without overriding the full update method"""
+        pass
 
     def mark_lost(self):
         """
@@ -267,7 +367,7 @@ class ObjectTracker(ABC):
         # Higher value = more retention of velocity when object is lost
         self.velocity *= 0.9  # Changed from 0.8 to 0.9
 
-        if self.lost_frames >= self.max_lost_frames:
+        if self.lost_frames >= self.config.max_lost_frames:
             self.is_lost = True
 
     def match_score(self, detection_box):
@@ -281,7 +381,7 @@ class ObjectTracker(ABC):
             detection_center = self._calculate_center(detection_box)
             
             # Use appropriate distance check based on configuration
-            if self.use_x_distance_only:
+            if self.config.use_x_distance_only:
                 # Only check x-bounds for search box
                 if not (self.search_box[0] <= detection_center[0] <= self.search_box[2]):
                     return 0.0
@@ -305,9 +405,9 @@ class ObjectTracker(ABC):
     def get_state(self):
         """
         Return the current state of the tracker.
-        Subclasses might add more info.
+        Includes all base fields and any enabled specialized fields.
         """
-        return {
+        state = {
             "id": self.id,
             "box": self.box.astype(int).tolist(),
             "search_box": self.search_box.astype(int).tolist(),
@@ -318,17 +418,36 @@ class ObjectTracker(ABC):
             "is_confident": self.is_confident,
             "is_lost": self.is_lost,
             "last_confidence": self.last_confidence,
-            "tracker_type": self.tracker_type,
+            "tracker_type": self.config.tracker_type,
             "width": self.width,
             "height": self.height,
+            "diameter": max(self.width, self.height),  # Always include diameter
         }
+        
+        # Add specialized fields based on enabled features
+        if self.config.source_region_id is not None:
+            state["source_region_id"] = self.config.source_region_id
+            
+        if self.config.detect_aspect_ratio_change:
+            state["is_standing"] = self.is_standing
+            if len(self.aspect_ratio_history) > 0:
+                state["aspect_ratio"] = self.aspect_ratio_history[-1]
+            
+        # Allow subclasses to add their own state
+        self._extend_state(state)
+            
+        return state
+        
+    def _extend_state(self, state):
+        """Hook for subclasses to extend the state without overriding the full get_state method"""
+        pass
 
     def draw(self, frame, show_search_box=False):
         """
         Draw the tracker's state onto the frame.
-        Only shows search box with label if show_search_box is True.
+        Handles drawing all enabled specialized visualizations.
         """
-        # Draw search box (dashed yellow) if requested
+        # Draw search box if requested
         if show_search_box:
             sb = self.search_box.astype(int)
             cv2.rectangle(
@@ -337,7 +456,7 @@ class ObjectTracker(ABC):
             # Add search box label
             cv2.putText(
                 frame,
-                f"{self.tracker_type} Search",
+                f"{self.config.tracker_type} Search",
                 (sb[0], sb[1] - 10),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
@@ -348,22 +467,36 @@ class ObjectTracker(ABC):
         # Draw current box
         b = self.box.astype(int)
         # Use tracker's own color if confident, red if lost
-        color = self.color if self.lost_frames == 0 else (0, 0, 255)
+        color = self.config.color if self.lost_frames == 0 else (0, 0, 255)
         thickness = 2  # Consistent thickness
         cv2.rectangle(frame, (b[0], b[1]), (b[2], b[3]), color, thickness)
 
         # Draw simple label (just the type)
         cv2.putText(
             frame,
-            f"{self.tracker_type}",
+            f"{self.config.tracker_type}",
             (b[0], b[1] - 10),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,
             color,
             2,
         )
+        
+        # Draw trajectory if enabled and showing search box
+        if show_search_box and self.config.trajectory_len > 0 and len(self.trajectory_positions) >= 2:
+            for i in range(1, len(self.trajectory_positions)):
+                pt1 = self.trajectory_positions[i-1].astype(int)
+                pt2 = self.trajectory_positions[i].astype(int)
+                cv2.line(frame, tuple(pt1), tuple(pt2), (0, 200, 255), 2)
+                
+        # Add custom drawing from subclasses
+        self._custom_draw(frame, show_search_box)
 
         return frame
+        
+    def _custom_draw(self, frame, show_search_box):
+        """Hook for subclasses to add custom drawing without overriding the full draw method"""
+        pass
 
     # Helper function for IoU calculation
     @staticmethod

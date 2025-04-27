@@ -50,6 +50,9 @@ class HandTrackerManager(TrackerManager):
             model_complexity=1,  # Use higher model complexity (0, 1, or 2)
         )
         
+        # Store hand types separately instead of in tracker objects
+        self.hand_types = {}  # {tracker_id: hand_type}
+        
         # Initialize position history for hands
         self.position_history["left_hands"] = []
         self.position_history["right_hands"] = []
@@ -69,15 +72,20 @@ class HandTrackerManager(TrackerManager):
         # Generate a stable ID based on hand type and position
         hand_id = self._get_hand_id(hand_type, center_x, center_y)
         
-        return HandTracker(
+        # Create tracker without hand_type
+        tracker = HandTracker(
             initial_box=box,
             frame_shape=frame_shape,
-            hand_type=hand_type,
             initial_confidence=confidence,
             tracker_id=hand_id,
             position_stability_factor=self.position_stability_factor,
             use_x_distance_only=True,  # Use only x-distance for side view
         )
+        
+        # Store hand type separately
+        self.hand_types[str(tracker.id)] = hand_type
+        
+        return tracker
 
     def _update_tracker_with_detection(self, tracker, detection):
         """Update a HandTracker with new detection"""
@@ -85,11 +93,18 @@ class HandTrackerManager(TrackerManager):
         confidence = detection.get("confidence", 0.0)
         hand_type = detection.get("hand_type", None)
         
+        # Update tracker with basic information
         tracker.update(
             box,
             detection_confidence=confidence,
-            hand_type=hand_type,
         )
+        
+        # Update hand type in our dictionary if provided
+        if hand_type:
+            self.hand_types[str(tracker.id)] = hand_type
+        
+        # Get hand type from our dictionary
+        tracker_hand_type = self.hand_types.get(str(tracker.id), "Unknown")
         
         # Update position history for this hand
         hand_id = str(tracker.id)
@@ -97,7 +112,7 @@ class HandTrackerManager(TrackerManager):
         center_y = (box[1] + box[3]) / 2
         
         # Update position in history
-        history_key = f"{tracker.hand_type.lower()}_hands"
+        history_key = f"{tracker_hand_type.lower()}_hands"
         if history_key in self.position_history:
             history = self.position_history[history_key]
             # Look for existing entry with this ID
@@ -162,8 +177,9 @@ class HandTrackerManager(TrackerManager):
         Prioritizes matching hands of the same type.
         """
         # If hand types don't match, increase cost significantly
-        if hasattr(tracker, 'hand_type') and 'hand_type' in detection:
-            if tracker.hand_type != detection['hand_type']:
+        if 'hand_type' in detection:
+            tracker_hand_type = self.hand_types.get(str(tracker.id))
+            if tracker_hand_type != detection['hand_type']:
                 return 10.0  # Very high cost to discourage matching different hand types
         
         # For hands of the same type, use default cost
@@ -174,15 +190,28 @@ class HandTrackerManager(TrackerManager):
         Additional validation for hand matches.
         """
         # For hands, we can be stricter about matching only the same hand type
-        if hasattr(tracker, 'hand_type') and 'hand_type' in detection:
-            if tracker.hand_type != detection['hand_type']:
+        if 'hand_type' in detection:
+            tracker_hand_type = self.hand_types.get(str(tracker.id))
+            if tracker_hand_type != detection['hand_type']:
                 return False  # Don't match hands of different types
                 
         return True
 
     def get_confident_hands(self):
         """Get the state of hand trackers that are currently confident"""
-        return self.get_confident_trackers()
+        hand_states = []
+        confident_trackers = self.get_confident_trackers()
+        
+        for tracker in confident_trackers:
+            # Get base state from tracker
+            state = tracker.get_state()
+            
+            # Add hand type from our dictionary
+            state["hand_type"] = self.hand_types.get(str(tracker.id), "Unknown")
+            
+            hand_states.append(state)
+            
+        return hand_states
         
     def detect_hands_raw(self, frame):
         """
@@ -278,7 +307,13 @@ class HandTrackerManager(TrackerManager):
         raw_hand_detections = self.detect_hands_raw(frame)
         
         # Update trackers with these detections
-        return self.update(raw_hand_detections, frame_shape)
+        tracker_states = self.update(raw_hand_detections, frame_shape)
+        
+        # Add hand types to each tracker state
+        for state in tracker_states:
+            state["hand_type"] = self.hand_types.get(str(state["id"]), "Unknown")
+            
+        return tracker_states
         
     def process_detr_results(self, results, model, frame_shape, frame=None, **kwargs):
         """
@@ -302,3 +337,13 @@ class HandTrackerManager(TrackerManager):
         """Release MediaPipe resources"""
         if hasattr(self, 'hands'):
             self.hands.close()
+
+    # Override to clean up hand types for removed trackers
+    def remove_tracker(self, tracker_id):
+        """Remove a tracker by ID"""
+        # Clean up hand type entry
+        if str(tracker_id) in self.hand_types:
+            del self.hand_types[str(tracker_id)]
+            
+        # Call parent implementation
+        super().remove_tracker(tracker_id)

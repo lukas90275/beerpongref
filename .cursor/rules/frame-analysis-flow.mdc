@@ -1,9 +1,4 @@
----
-description: function of `src/frame_analysis.py` and how it fits into the overall video processing
-globs: 
-alwaysApply: false
----
- # Frame Analysis Pipeline
+# Frame Analysis Pipeline
 
 This rule describes the function of `src/frame_analysis.py` and how it fits into the overall video processing.
 
@@ -22,4 +17,4 @@ This rule describes the function of `src/frame_analysis.py` and how it fits into
     8.  Draws visualizations onto the frame (bounding boxes, labels) using the `.draw_trackers()` methods of the managers or specific drawing functions.
     9.  Returns the annotated frame and a dictionary containing the current state of all detected and tracked objects.
 
--   **Usage:** `analyze_frame` is typically called in a loop by a higher-level script that reads video frames, such as `src/test_video.py` for offline processing or potentially a script handling a live camera feed.
+-   **Usage:** `analyze_frame` is typically called in a loop by a higher-level script that reads video frames, such as `src/test_video.py` for offline processing or potentially a script handling a live camera feed. 

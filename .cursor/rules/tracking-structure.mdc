@@ -1,9 +1,4 @@
----
-description: structure and purpose of the two abstract base classes used for object tracking
-globs: 
-alwaysApply: false
----
- # Object Tracking Base Classes
+# Object Tracking Base Classes
 
 This rule outlines the structure and purpose of the two abstract base classes used for object tracking in this project.
 
@@ -28,4 +23,4 @@ This rule outlines the structure and purpose of the two abstract base classes us
         -   Creates new trackers for unmatched detections (unless `track_single_instance` is true).
         -   Removes trackers lost for too long (`remove_lost_trackers`).
         -   Estimates camera motion (`_estimate_camera_motion`) to compensate tracker predictions.
-    -   Concrete managers (e.g., `HandTrackerManager`, `TableTrackerManager`) inherit from this.
+    -   Concrete managers (e.g., `HandTrackerManager`, `TableTrackerManager`) inherit from this. 
