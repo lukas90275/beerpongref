@@ -16,8 +16,8 @@ class HandTrackerManager(TrackerManager):
         iou_threshold=0.3,
         min_confidence_frames=3,
         max_lost_frames=8,
-        detection_threshold=0.5,
-        min_tracking_confidence=0.5,
+        detection_threshold=0.1,
+        min_tracking_confidence=0.1,
         **kwargs
     ):
         # Hand-specific parameters
@@ -217,7 +217,22 @@ class HandTrackerManager(TrackerManager):
             raw_hand_detections = self.detect_hands_raw(frame)
             
             # Update trackers with the standard update method
-            return self.update(raw_hand_detections, frame_shape, **kwargs)
+            tracker_states = self.update(raw_hand_detections, frame_shape, **kwargs)
+            
+            # Ensure that all hand trackers have their ball_region property set and added to state
+            for tracker in self.trackers:
+                # Force prediction to ensure updated positions
+                tracker.predict()
+                
+                # If the tracker doesn't have a ball_region, calculate it
+                if not hasattr(tracker, "ball_region") or tracker.ball_region is None:
+                    if hasattr(tracker, "_calculate_ball_region"):
+                        tracker.ball_region = tracker._calculate_ball_region()
+            
+            # Get updated states with ball regions
+            tracker_states = [tracker.get_state() for tracker in self.trackers]
+            
+            return tracker_states
         except Exception as e:
             print(f"Error in hand detection processing: {e}")
             return []

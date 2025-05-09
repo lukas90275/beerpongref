@@ -13,22 +13,10 @@ model = DetrForObjectDetection.from_pretrained("facebook/detr-resnet-50")
 
 # Store managers in a list for easier iteration
 tracker_managers = {
-    "table": TableTrackerManager(iou_threshold=0.6, max_lost_frames=20, detection_threshold=0.5),
-    "cup": CupTrackerManager(
-        iou_threshold=0.6,
-        min_confidence_frames=5,
-        max_lost_frames=20,
-        detection_threshold=0.4
-    ),
-    "hand": HandTrackerManager(iou_threshold=0.2, max_lost_frames=15),
-    "ball": BallTrackerManager(
-        iou_threshold=0.3,
-        min_confidence_frames=1,
-        max_lost_frames=15,
-        detection_threshold=0.3,
-        size_filtering=True,
-        position_stability_factor=0.0,
-    ),
+    "table": TableTrackerManager(),
+    "cup": CupTrackerManager(),
+    "hand": HandTrackerManager(),
+    "ball": BallTrackerManager(),
 }
 
 # Initialize the ball in hand detector
@@ -135,7 +123,7 @@ def analyze_frame(frame, table_viz=True, hand_viz=True, cup_viz=True, ball_viz=T
         
     # 4. Process Balls (using hand trackers for regions)  
     detections["balls_tracked"] = tracker_managers["ball"].process_detr_results(
-        results, model, frame.shape[:2], hand_trackers=detections["hands_tracked"]
+        results, model, frame.shape[:2], frame=frame, hand_trackers=detections["hands_tracked"]
     )
 
     # --- Draw Trackers ---
@@ -145,7 +133,16 @@ def analyze_frame(frame, table_viz=True, hand_viz=True, cup_viz=True, ball_viz=T
     
     # Draw Hands if hand visualization is enabled
     if hand_viz:
+        # Draw hand trackers first
         annotated_frame = tracker_managers["hand"].draw_trackers(annotated_frame, show_search_box=hand_search_viz)
+        
+        # If ball search visualization is enabled, ensure we draw those regions 
+        # right after drawing hands to ensure they're shown even if no balls are detected
+        if ball_search_viz:
+            # Force recalculating regions from current hand trackers
+            tracker_managers["ball"]._add_hand_regions(hand_trackers=detections["hands_tracked"])
+            # Draw all ball search regions
+            annotated_frame = tracker_managers["ball"].draw_regions(annotated_frame, show_expected_size=True)
     
     # Draw Cups (including regions) if cup visualization is enabled
     if cup_viz:
@@ -155,8 +152,25 @@ def analyze_frame(frame, table_viz=True, hand_viz=True, cup_viz=True, ball_viz=T
         
     # Draw Balls if ball visualization is enabled
     if ball_viz:
-        if ball_search_viz:
+        # We already drew ball regions above when hand_viz and ball_search_viz are both true
+        # So only draw them here if hand_viz is false but ball_search_viz is true
+        if ball_search_viz and not hand_viz:
             annotated_frame = tracker_managers["ball"].draw_regions(annotated_frame, show_expected_size=True)
-        annotated_frame = tracker_managers["ball"].draw_trackers(annotated_frame, show_search_box=ball_search_viz)
+            
+        # If ball_search_viz is enabled, detect and show circles for debugging
+        if ball_search_viz and frame is not None:
+            # Get raw circle detections
+            circle_detections = tracker_managers["ball"].detect_circles(frame)
+            # Draw them
+            if circle_detections:
+                annotated_frame = tracker_managers["ball"].draw_detections(annotated_frame, circle_detections)
+            
+        # Option to show blob detections along with search boxes
+        show_blob_detections = ball_search_viz  # Show blob detections when search box is shown
+        annotated_frame = tracker_managers["ball"].draw_trackers(
+            annotated_frame, 
+            show_search_box=ball_search_viz,
+            show_blob_detections=show_blob_detections
+        )
 
     return annotated_frame, detections

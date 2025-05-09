@@ -26,6 +26,7 @@ class TrackerConfig:
         aspect_ratio_history_len=5,
         search_region_bounds=None,
         source_region_id=None,
+        directional_search_expansion=False,  # Whether to expand search box more in velocity direction
     ):
         # Basic tracker identification
         self.tracker_type = tracker_type
@@ -41,6 +42,7 @@ class TrackerConfig:
         self.velocity_threshold = velocity_threshold
         self.position_stability_factor = position_stability_factor
         self.use_x_distance_only = use_x_distance_only
+        self.directional_search_expansion = directional_search_expansion
         
         # Feature flags and specialized parameters
         self.trajectory_len = trajectory_len
@@ -242,19 +244,43 @@ class ObjectTracker(ABC):
                 # Update center
                 self.center = stabilized_center
 
-        # Define search box based on the *predicted* box
+        # Define base expansion factor
         if self.lost_frames > 0:
             # Expand search area if object was lost
-            search_width = width * (self.config.search_expansion_factor**self.lost_frames)
-            search_height = height * (self.config.search_expansion_factor**self.lost_frames)
+            base_expansion = self.config.search_expansion_factor * self.lost_frames
         else:
-            search_width = width * self.config.search_expansion_factor
-            search_height = height * self.config.search_expansion_factor
-
-        # Center the search box around the predicted center
-        self.search_box = self._update_box_from_center(
-            self.center, search_width, search_height
-        )
+            base_expansion = self.config.search_expansion_factor
+            
+        # Use directional search expansion if enabled and x-velocity is significant
+        if self.config.directional_search_expansion and abs(self.velocity[0]) > self.config.velocity_threshold:
+            # Only consider x-direction velocity for directional expansion
+            direction_x = np.sign(self.velocity[0])
+            
+            # Calculate expansions - double in direction of motion, normal in other direction
+            if direction_x > 0:  # Moving right
+                left_expansion = width * base_expansion
+                right_expansion = width * base_expansion * 2
+            else:  # Moving left
+                left_expansion = width * base_expansion * 2
+                right_expansion = width * base_expansion
+            
+            # Normal expansion in y-direction
+            top_expansion = height * base_expansion
+            bottom_expansion = height * base_expansion
+        else:
+            # Standard expansion in all directions
+            left_expansion = width * base_expansion
+            right_expansion = width * base_expansion
+            top_expansion = height * base_expansion
+            bottom_expansion = height * base_expansion
+        
+        # Create search box with directional expansion
+        self.search_box = np.array([
+            self.center[0] - left_expansion,
+            self.center[1] - top_expansion,
+            self.center[0] + right_expansion,
+            self.center[1] + bottom_expansion
+        ])
 
         # Clip boxes to frame boundaries
         self.box = self._clip_to_frame(self.box)

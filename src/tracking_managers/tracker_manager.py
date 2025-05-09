@@ -50,6 +50,7 @@ class TrackerManager(ABC):
         position_id_name_format="{region}_{object}_{index}",  # Format string for position-based IDs
         # Search box parameters
         search_box_expansion_factor=1.5,  # Factor to expand object size for search box
+        directional_search_expansion=False,  # Whether to expand search box more in direction of motion
         # Region drawing parameters
         draw_region_color=(100, 255, 255),  # Default color for region boxes (BGR)
         draw_region_label_prefix="Region",  # Prefix for region labels
@@ -125,6 +126,7 @@ class TrackerManager(ABC):
 
         # Search box parameters
         self.search_box_expansion_factor = search_box_expansion_factor
+        self.directional_search_expansion = directional_search_expansion
         
         # Region drawing parameters
         self.draw_region_color = draw_region_color

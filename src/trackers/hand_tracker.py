@@ -15,7 +15,7 @@ class HandTracker(ObjectTracker):
         initial_box, 
         frame_shape, 
         initial_confidence, 
-        ball_region_expansion=1.3,
+        ball_region_expansion=4.0,
         **kwargs
     ):
         config = TrackerConfig(
@@ -77,8 +77,15 @@ class HandTracker(ObjectTracker):
             
     def _extend_state(self, state):
         """Add ball region to state dictionary"""
+        # Always include ball_region in the state, even for non-confident hands
+        # This ensures that ball search regions are shown for every detected hand
         if self.ball_region is not None:
             state["ball_region"] = self.ball_region.astype(int).tolist()
+        else:
+            # Recalculate ball region if it's somehow missing
+            self.ball_region = self._calculate_ball_region()
+            if self.ball_region is not None:
+                state["ball_region"] = self.ball_region.astype(int).tolist()
             
     def _custom_draw(self, frame, show_search_box):
         """Draw ball region if showing search box"""
@@ -90,7 +97,7 @@ class HandTracker(ObjectTracker):
                 (br[2], br[3]),
                 (0, 255, 255),  # Yellow for ball region
                 1,
-                cv2.LINE_DASH
+                cv2.LINE_AA
             )
             cv2.putText(
                 frame,
